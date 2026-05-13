@@ -1,46 +1,31 @@
-import { NextResponse } from "next/server";
-import { applicationStore } from "@/lib/store";
-import type { ApplicationRecord, ApplicationStatus } from "@/lib/types";
+import { handleJsonApi, parseJsonBody } from "@/lib/http/with-api-handler";
+import { applicationCreateSchema } from "@/validators/api-schemas";
+import { ApplicationsService } from "@/services/applications.service";
+import { requirePermission } from "@/lib/auth/rbac";
 
-export async function GET() {
-  return NextResponse.json({
-    applications: applicationStore
-  });
+const applicationsService = new ApplicationsService();
+
+export async function GET(request: Request) {
+  return handleJsonApi(
+    request,
+    async (_req, ctx) => {
+      requirePermission(ctx.role, "candidate:track_jobs");
+      return applicationsService.list(ctx);
+    },
+    {
+      rateLimitKey: "api:applications:get"
+    }
+  );
 }
 
 export async function POST(request: Request) {
-  try {
-    const body = (await request.json()) as Partial<ApplicationRecord>;
-
-    if (!body.jobId || !body.resumeId) {
-      return NextResponse.json({ error: "jobId and resumeId are required." }, { status: 400 });
-    }
-
-    const record: ApplicationRecord = {
-      id: `app-${Date.now()}`,
-      jobId: body.jobId,
-      userId: body.userId || "user-demo",
-      resumeId: body.resumeId,
-      status: (body.status as ApplicationStatus) || "Saved",
-      atsScore: body.atsScore || 0,
-      realismScore: body.realismScore || 0,
-      appliedAt: new Date().toISOString().slice(0, 10),
-      artifacts: body.artifacts || {
-        resumeDocx: `s3://lp-demo/${body.resumeId}.docx`,
-        jdSnapshot: `s3://lp-demo/${body.jobId}-jd.txt`,
-        coverLetter: `s3://lp-demo/${body.jobId}-cover.txt`
-      }
-    };
-
-    applicationStore.unshift(record);
-    return NextResponse.json(record);
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: "Application tracking failed.",
-        detail: error instanceof Error ? error.message : "Unknown error"
-      },
-      { status: 500 }
-    );
-  }
+  return handleJsonApi(
+    request,
+    async (req, ctx) => {
+      requirePermission(ctx.role, "candidate:track_jobs");
+      const body = await parseJsonBody(req, applicationCreateSchema);
+      return applicationsService.create(body, ctx);
+    },
+    { rateLimitKey: "api:applications:post" }
+  );
 }

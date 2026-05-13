@@ -46,6 +46,7 @@ import {
   TECHNOLOGY_TIMELINES
 } from "@/lib/catalog";
 import type { ResumeGenerationRequest, ResumeGenerationResult } from "@/lib/types";
+import { unwrapResumeGeneration } from "@/lib/http/unwrap-api";
 
 type TabId = "command" | "studio" | "repository" | "jobs" | "admin" | "architecture";
 
@@ -704,6 +705,7 @@ export default function LegitimatePartnerApp() {
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json"
         },
@@ -711,11 +713,7 @@ export default function LegitimatePartnerApp() {
       });
 
       const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || "Generation failed.");
-      }
-
-      setResult(payload as ResumeGenerationResult);
+      setResult(unwrapResumeGeneration(payload));
       setActiveTab("studio");
     } catch (generationError) {
       setError(generationError instanceof Error ? generationError.message : "Generation failed.");

@@ -1,29 +1,28 @@
-import { NextResponse } from "next/server";
-import { jobStore } from "@/lib/store";
+import { handleJsonApi } from "@/lib/http/with-api-handler";
+import { JobRepository } from "@/repositories/job.repository";
+import { requirePermission } from "@/lib/auth/rbac";
+
+const jobRepository = new JobRepository();
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const query = (searchParams.get("q") || "").toLowerCase();
-  const domain = (searchParams.get("domain") || "").toLowerCase();
-
-  const jobs = jobStore
-    .filter((job) => (domain ? job.domain.toLowerCase() === domain : true))
-    .filter((job) => {
-      if (!query) {
-        return true;
-      }
-      const haystack = `${job.title} ${job.company} ${job.location} ${job.domain} ${job.skills.join(" ")}`.toLowerCase();
-      return haystack.includes(query);
-    })
-    .sort((a, b) => b.normalizedScore - a.normalizedScore);
-
-  return NextResponse.json({
-    jobs,
-    sourceCoverage: ["LinkedIn", "Dice", "Monster", "ZipRecruiter", "Glassdoor", "Prime Vendor"],
-    antiSpamPolicy: {
-      mode: "human_assisted",
-      rateLimit: "20 prepared applications per user per day",
-      automationBoundary: "Connector workflows prepare and track applications but do not spam-submit."
-    }
-  });
+  return handleJsonApi(
+    request,
+    async (req, ctx) => {
+      requirePermission(ctx.role, "candidate:track_jobs");
+      const { searchParams } = new URL(req.url);
+      const q = searchParams.get("q") ?? "";
+      const domain = searchParams.get("domain") ?? "";
+      const jobs = await jobRepository.search(ctx.tenantId, q, domain);
+      return {
+        jobs,
+        sourceCoverage: ["LinkedIn", "Dice", "Monster", "ZipRecruiter", "Glassdoor", "Prime Vendor"],
+        antiSpamPolicy: {
+          mode: "human_assisted",
+          rateLimit: "20 prepared applications per user per day",
+          automationBoundary: "Connector workflows prepare and track applications but do not spam-submit."
+        }
+      };
+    },
+    { rateLimitKey: "api:jobs" }
+  );
 }

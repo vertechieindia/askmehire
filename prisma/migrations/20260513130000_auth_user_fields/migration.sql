@@ -1,0 +1,9 @@
+-- Auth-related columns on users (Phase 2)
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "email_verified" TIMESTAMP(3);
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "image" TEXT;
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "portal_key" TEXT;
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "failed_login_attempts" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "locked_until" TIMESTAMP(3);
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "users_portal_key_key" ON "users"("portal_key");

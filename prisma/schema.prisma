@@ -1,0 +1,444 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Core tenancy & identity (contract: database/schema.sql + additive columns) ---
+
+model Tenant {
+  id        String   @id @db.Uuid
+  name      String
+  plan      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users         User[]
+  components    Component[]
+  jobs          Job[]
+  resumes       Resume[]
+  applications  Application[]
+  auditEvents   AuditEvent[]
+
+  @@map("tenants")
+}
+
+model User {
+  id        String   @id @db.Uuid
+  tenantId  String?  @map("tenant_id") @db.Uuid
+  name      String
+  email     String   @unique
+  passwordHash String? @map("password_hash")
+  role      String
+  status    String   @default("active")
+  title     String?
+  emailVerified DateTime? @map("email_verified")
+  image     String?
+  portalKey String? @unique @map("portal_key")
+  failedLoginAttempts Int @default(0) @map("failed_login_attempts")
+  lockedUntil DateTime? @map("locked_until")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+
+  resumes      Resume[]
+  applications Application[]
+
+  @@index([tenantId, role, status], map: "users_tenant_role_idx")
+  @@map("users")
+}
+
+model CompanyRole {
+  id        String   @id @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  permissions String[] @default([])
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, status], map: "company_roles_tenant_idx")
+  @@map("company_roles")
+}
+
+model Role {
+  id       String @id @db.Uuid
+  name     String
+  category String
+
+  components Component[]
+
+  @@map("roles")
+}
+
+model Domain {
+  id      String @id @db.Uuid
+  name    String @unique
+  profile Json   @default("{}")
+
+  components Component[]
+
+  @@map("domains")
+}
+
+model Technology {
+  id           String   @id @db.Uuid
+  name         String   @unique
+  validFrom    Int      @map("valid_from")
+  validTo      Int      @map("valid_to")
+  aliases      String[] @default([])
+  category     String
+  maturityNote String?  @map("maturity_note")
+
+  components Component[]
+
+  @@map("technologies")
+}
+
+model Component {
+  id               String   @id @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  roleId           String?  @map("role_id") @db.Uuid
+  technologyId     String?  @map("technology_id") @db.Uuid
+  domainId         String?  @map("domain_id") @db.Uuid
+  timelineStart    Int      @map("timeline_start")
+  timelineEnd      Int      @map("timeline_end")
+  componentType    String   @map("component_type")
+  intent           String
+  baseLogic        String   @map("base_logic")
+  variations       Json     @default("[]")
+  embedding        Unsupported("vector(1536)")?
+  qualityScore     Float    @default(0) @map("quality_score")
+  usageCount       Int      @default(0) @map("usage_count")
+  freshnessScore   Float    @default(100) @map("freshness_score")
+  deprecationScore Float    @default(0) @map("deprecation_score")
+  status           String
+  tags             String[] @default([])
+  createdById      String?  @map("created_by") @db.Uuid
+  approvedById   String?  @map("approved_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  role       Role?       @relation(fields: [roleId], references: [id])
+  technology Technology? @relation(fields: [technologyId], references: [id])
+  domain     Domain?     @relation(fields: [domainId], references: [id])
+
+  resumeComponentUses ResumeComponentUse[]
+
+  @@index([tenantId, status, componentType, timelineStart, timelineEnd], map: "components_lookup_idx")
+  @@map("components")
+}
+
+model Resume {
+  id             String   @id @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  parentResumeId String?  @map("parent_resume_id") @db.Uuid
+  jdHash         String   @map("jd_hash")
+  role           String
+  domain         String
+  strategy       String
+  storagePath    String?  @map("storage_path")
+  markdown       String?
+  atsScore       Float    @default(0) @map("ats_score")
+  realismScore   Float    @default(0) @map("realism_score")
+  domainScore    Float    @default(0) @map("domain_score")
+  timelineScore  Float    @default(0) @map("timeline_score")
+  uniquenessScore Float   @default(0) @map("uniqueness_score")
+  promptVersion  String   @map("prompt_version")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  parent   Resume?  @relation("ResumeTree", fields: [parentResumeId], references: [id])
+  children Resume[] @relation("ResumeTree")
+
+  resumeComponentUses ResumeComponentUse[]
+  applications        Application[]
+
+  @@map("resumes")
+}
+
+model ResumeComponentUse {
+  id          String   @id @db.Uuid
+  resumeId    String   @map("resume_id") @db.Uuid
+  componentId String   @map("component_id") @db.Uuid
+  reason      String
+  score       Float
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  resume    Resume    @relation(fields: [resumeId], references: [id])
+  component Component @relation(fields: [componentId], references: [id])
+
+  @@map("resume_component_uses")
+}
+
+model Job {
+  id              String    @id @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  source          String
+  externalId      String?   @map("external_id")
+  title           String
+  company         String
+  location        String?
+  domain          String?
+  skills          String[]  @default([])
+  description     String?
+  jdHash          String?   @map("jd_hash")
+  embedding       Unsupported("vector(1536)")?
+  normalizedScore Float     @default(0) @map("normalized_score")
+  applyMode       String    @default("human_assisted") @map("apply_mode")
+  postedAt        DateTime? @map("posted_at") @db.Date
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  applications Application[]
+
+  @@map("jobs")
+}
+
+model JobConnector {
+  id                 String    @id @db.Uuid
+  tenantId           String?   @map("tenant_id") @db.Uuid
+  portalName         String    @map("portal_name")
+  authMode           String    @map("auth_mode")
+  applyMode          String    @map("apply_mode")
+  status             String    @default("not_connected")
+  refreshEverySeconds Int      @default(60) @map("refresh_every_seconds")
+  safetyControls     String[]  @default([]) @map("safety_controls")
+  credentialRef      String?   @map("credential_ref")
+  lastSyncedAt       DateTime? @map("last_synced_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  @@index([tenantId, portalName, status], map: "job_connectors_scope_idx")
+  @@map("job_connectors")
+}
+
+model CandidateApplicationProfile {
+  id                 String   @id @db.Uuid
+  tenantId           String?  @map("tenant_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  legalName          String   @map("legal_name")
+  email              String
+  phone              String?
+  linkedin           String?
+  currentLocation    String?  @map("current_location")
+  targetLocations    String[] @default([]) @map("target_locations")
+  jobTitles          String[] @default([]) @map("job_titles")
+  keywords           String[] @default([])
+  blocklistedWords   String[] @default([]) @map("blocklisted_words")
+  workAuthorization  String?  @map("work_authorization")
+  visaSponsorship    String?  @map("visa_sponsorship")
+  employmentTypes    String[] @default([]) @map("employment_types")
+  expectedRate       String?  @map("expected_rate")
+  availability       String?
+  relocation         String?
+  primaryResumeId    String?  @map("primary_resume_id") @db.Uuid
+  reusableAnswers    Json     @default("{}") @map("reusable_answers")
+  connectorStatuses  Json     @default("{}") @map("connector_statuses")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, userId], map: "candidate_application_profiles_user_idx")
+  @@map("candidate_application_profiles")
+}
+
+model SyncedRole {
+  id             String   @id @db.Uuid
+  tenantId       String?  @map("tenant_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  portalName     String   @map("portal_name")
+  title          String
+  company        String
+  location       String?
+  contractType   String?  @map("contract_type")
+  recruiterName  String?  @map("recruiter_name")
+  recruiterEmail String?  @map("recruiter_email")
+  link           String?
+  jd             String
+  keywords       String[] @default([])
+  matchScore     Float    @default(0) @map("match_score")
+  exclusionHits  String[] @default([]) @map("exclusion_hits")
+  matchedSignals String[] @default([]) @map("matched_signals")
+  status         String   @default("new")
+  safeApplyMode  String   @map("safe_apply_mode")
+  discoveredAt   DateTime @default(now()) @map("discovered_at")
+
+  @@index([tenantId, userId, status, matchScore], map: "synced_roles_user_status_idx")
+  @@map("synced_roles")
+}
+
+model AppliedRoleRecord {
+  id                 String   @id @db.Uuid
+  tenantId           String?  @map("tenant_id") @db.Uuid
+  userId             String   @map("user_id") @db.Uuid
+  syncedRoleId       String?  @map("synced_role_id") @db.Uuid
+  portalName         String   @map("portal_name")
+  companyName        String   @map("company_name")
+  title              String
+  jd                 String
+  link               String?
+  recruiterEmail     String?  @map("recruiter_email")
+  resumeId           String?  @map("resume_id") @db.Uuid
+  resumeSnapshot     String?  @map("resume_snapshot")
+  applicationPayload Json     @default("{}") @map("application_payload")
+  response           String?
+  status             String   @default("prepared")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, userId, status], map: "applied_role_records_user_idx")
+  @@map("applied_role_records")
+}
+
+model Application {
+  id               String    @id @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  jobId          String    @map("job_id") @db.Uuid
+  resumeId       String    @map("resume_id") @db.Uuid
+  status         String
+  appliedAt      DateTime? @map("applied_at")
+  atsScore       Float     @default(0) @map("ats_score")
+  realismScore   Float     @default(0) @map("realism_score")
+  resumeDocxPath String?   @map("resume_docx_path")
+  resumePdfPath  String?   @map("resume_pdf_path")
+  jdSnapshotPath String?   @map("jd_snapshot_path")
+  coverLetterPath String?  @map("cover_letter_path")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+  job    Job    @relation(fields: [jobId], references: [id])
+  resume Resume @relation(fields: [resumeId], references: [id])
+
+  @@index([tenantId, userId, status], map: "applications_status_idx")
+  @@map("applications")
+}
+
+model MailThread {
+  id                String   @id @db.Uuid
+  tenantId          String?  @map("tenant_id") @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  jobId             String?  @map("job_id") @db.Uuid
+  contactName       String   @map("contact_name")
+  contactEmail      String   @map("contact_email")
+  company           String?
+  subject           String
+  direction         String
+  status            String
+  lastMessage       String?  @map("last_message")
+  draft             String?
+  approvedById      String?  @map("approved_by") @db.Uuid
+  providerMessageId String?  @map("provider_message_id")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, userId, status], map: "mail_threads_user_status_idx")
+  @@map("mail_threads")
+}
+
+model BillingLedger {
+  id                String   @id @db.Uuid
+  tenantId          String?  @map("tenant_id") @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  label             String
+  units             Int      @default(0)
+  amountCents       Int      @default(0) @map("amount_cents")
+  status            String   @default("open")
+  providerInvoiceId String?  @map("provider_invoice_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, userId, status], map: "billing_ledger_scope_idx")
+  @@map("billing_ledger")
+}
+
+model UsageEvent {
+  id         String   @id @db.Uuid
+  tenantId   String?  @map("tenant_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  eventType  String   @map("event_type")
+  units      Int      @default(1)
+  tokensUsed Int      @default(0) @map("tokens_used")
+  costCents  Int      @default(0) @map("cost_cents")
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, userId, eventType], map: "usage_events_scope_idx")
+  @@map("usage_events")
+}
+
+model VerifiedIntelligenceLoad {
+  id           String   @id @db.Uuid
+  tenantId     String?  @map("tenant_id") @db.Uuid
+  uploadedById String?  @map("uploaded_by") @db.Uuid
+  keyword      String
+  jobTitles    String[] @default([]) @map("job_titles")
+  timelineStart Int     @map("timeline_start")
+  timelineEnd   Int     @map("timeline_end")
+  domains      String[] @default([])
+  bulletCount  Int      @default(0) @map("bullet_count")
+  status       String   @default("draft")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("verified_intelligence_loads")
+}
+
+model PromptVersion {
+  id                 String   @id @db.Uuid
+  tenantId           String   @map("tenant_id") @db.Uuid
+  name               String
+  systemPrompt       String   @map("system_prompt")
+  modelRoute         String   @map("model_route")
+  status             String
+  averageAtsScore    Float    @default(0) @map("average_ats_score")
+  averageRealismScore Float   @default(0) @map("average_realism_score")
+  callbackRate       Float    @default(0) @map("callback_rate")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@map("prompt_versions")
+}
+
+model AuditEvent {
+  id         String   @id @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  payload    Json     @default("{}")
+  severity   String   @default("info")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, entityType, entityId], map: "audit_events_entity_idx")
+  @@map("audit_events")
+}
+
+model SkillTaxonomy {
+  id            String   @id @db.Uuid
+  canonicalName String   @map("canonical_name")
+  aliases       String[]
+  category      String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("skill_taxonomy")
+}
+
+model FeedbackEvent {
+  id            String   @id @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  applicationId String?  @map("application_id") @db.Uuid
+  resumeId      String?  @map("resume_id") @db.Uuid
+  eventType     String   @map("event_type")
+  notes         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("feedback_events")
+}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { getSession, signIn, signOut, useSession } from "next-auth/react";
 import {
   Activity,
   Archive,
@@ -57,6 +58,7 @@ import {
   createAppliedRoleRecord,
   syncJobsForCandidate
 } from "@/lib/job-integrations";
+import { matchSyncedRoleToCatalogJobId, pickSeededResumeLegacyId } from "@/lib/job-catalog-match";
 import {
   buildFormattedResumePlainText,
   buildResumeSourceText,
@@ -99,7 +101,13 @@ import type {
   PortalUser,
   Tenant
 } from "@/lib/portal";
-import type { ResumeGenerationRequest, ResumeGenerationResult } from "@/lib/types";
+import type {
+  ApplicationRecord,
+  JobsApiData,
+  ResumeGenerationRequest,
+  ResumeGenerationResult
+} from "@/lib/types";
+import { fetchApiEnvelope, unwrapResumeGeneration } from "@/lib/http/unwrap-api";
 import { reviewComponentDraft } from "@/lib/resume-engine";
 
 type TabId =
@@ -153,6 +161,13 @@ const ADMIN_OPS_NAV_ITEMS: Array<{ id: TabId; label: string; icon: LucideIcon }>
 ];
 
 const DEFAULT_TEMPLATE_LIMIT = 3;
+
+function apiTenantHeaders(tenantUuid: string | null | undefined): Record<string, string> {
+  if (!tenantUuid || !/^[0-9a-f-]{36}$/i.test(tenantUuid)) {
+    return {};
+  }
+  return { "x-tenant-id": tenantUuid };
+}
 
 const SAMPLE_RESUME = `Alex Morgan
 Senior Data Engineer
@@ -283,20 +298,39 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function SignInScreen({ onSignIn }: { onSignIn: (userId: string) => void }) {
+function SignInScreen({ onSignIn }: { onSignIn: (portalKey: string) => void }) {
   const [email, setEmail] = useState("superadmin@askmehire.com");
   const [password, setPassword] = useState("Askmehire@123");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submitWithCredentials(nextEmail: string, nextPassword: string) {
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await signIn("credentials", {
+        email: nextEmail.trim().toLowerCase(),
+        password: nextPassword,
+        redirect: false
+      });
+      if (res?.error) {
+        setError("Invalid email or password.");
+        return;
+      }
+      const s = await getSession();
+      const portalKey = s?.user?.portalKey;
+      if (!portalKey) {
+        setError("Signed in but portal profile is missing. Run db seed and ensure portal_key is set.");
+        return;
+      }
+      onSignIn(portalKey);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function submit() {
-    const credential = SIGN_IN_USERS.find(
-      (item) => item.email.toLowerCase() === email.trim().toLowerCase() && item.password === password
-    );
-    if (!credential) {
-      setError("Credentials did not match a seeded portal account.");
-      return;
-    }
-    onSignIn(credential.userId);
+    void submitWithCredentials(email, password);
   }
 
   return (
@@ -326,9 +360,9 @@ function SignInScreen({ onSignIn }: { onSignIn: (userId: string) => void }) {
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <button className="icon-button text auth-submit" onClick={submit}>
+        <button className="icon-button text auth-submit" onClick={submit} disabled={busy}>
           <KeyRound size={17} />
-          Sign In
+          {busy ? "Signing in…" : "Sign In"}
         </button>
 
         <div className="quick-login-grid">
@@ -340,10 +374,12 @@ function SignInScreen({ onSignIn }: { onSignIn: (userId: string) => void }) {
             return (
               <button
                 key={credential.userId}
+                type="button"
+                disabled={busy}
                 onClick={() => {
                   setEmail(credential.email);
                   setPassword(credential.password);
-                  onSignIn(credential.userId);
+                  void submitWithCredentials(credential.email, credential.password);
                 }}
               >
                 <strong>{ROLE_LABELS[user.role]}</strong>
@@ -1541,7 +1577,8 @@ function CandidateDesk({
   resumeRuns,
   setResumeRuns,
   result,
-  setResult
+  setResult,
+  apiTenantId
 }: {
   currentUser: PortalUser;
   users: PortalUser[];
@@ -1557,6 +1594,7 @@ function CandidateDesk({
   setResumeRuns: (runs: ResumeRunRecord[]) => void;
   result: ResumeGenerationResult | null;
   setResult: (result: ResumeGenerationResult | null) => void;
+  apiTenantId: string | null;
 }) {
   const candidateProfile = candidateProfiles.find((profile) => profile.userId === currentUser.id) || buildDefaultProfileForUser(currentUser);
   const [currentStructuredInput, setCurrentStructuredInput] = useState<CandidateResumeInput>(createSubbareddySampleInput);
@@ -1628,14 +1666,12 @@ function CandidateDesk({
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...apiTenantHeaders(apiTenantId) },
         body: JSON.stringify(nextForm)
       });
       const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || "Generation failed.");
-      }
-      const resultPayload = payload as ResumeGenerationResult;
+      const resultPayload = unwrapResumeGeneration(payload);
       setResult({
         ...resultPayload,
         resumeMarkdown: buildFormattedResumePlainText(input)
@@ -1717,12 +1753,13 @@ function CandidateDesk({
     }
     const response = await fetch("/api/resume-docx", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...apiTenantHeaders(apiTenantId) },
       body: JSON.stringify({ input: activeResumeInput })
     });
     if (!response.ok) {
-      const payload = await response.json();
-      setError(payload.error || "DOCX export failed.");
+      const payload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+      setError(payload?.error?.message ?? "DOCX export failed.");
       return;
     }
     const blob = await response.blob();
@@ -1853,7 +1890,8 @@ function JobsAndApplications({
   setSyncedRoles,
   appliedRoles,
   setAppliedRoles,
-  result
+  result,
+  apiTenantId
 }: {
   currentUser: PortalUser;
   users: PortalUser[];
@@ -1865,23 +1903,63 @@ function JobsAndApplications({
   appliedRoles: AppliedRoleRecord[];
   setAppliedRoles: (records: AppliedRoleRecord[]) => void;
   result: ResumeGenerationResult | null;
+  apiTenantId: string | null;
 }) {
   const profile = candidateProfiles.find((item) => item.userId === currentUser.id) || buildDefaultProfileForUser(currentUser);
   const [syncCycle, setSyncCycle] = useState(0);
   const [lastSync, setLastSync] = useState<string>("Not synced yet");
   const visibleRoles = syncedRoles.filter((role) => role.id.startsWith(`${profile.userId}-`));
+  const [dbJobs, setDbJobs] = useState<JobsApiData["jobs"]>([]);
+  const [dbApplications, setDbApplications] = useState<ApplicationRecord[]>([]);
+  const [serverIndexError, setServerIndexError] = useState<string | null>(null);
+  const [serverIndexLoading, setServerIndexLoading] = useState(false);
+  const [prepareApiError, setPrepareApiError] = useState<string | null>(null);
+  const [jobSearchInput, setJobSearchInput] = useState("");
+  const [jobDomainInput, setJobDomainInput] = useState("");
+
+  async function loadServerJobIndex(q: string, domain: string) {
+    setServerIndexError(null);
+    setPrepareApiError(null);
+    setServerIndexLoading(true);
+    try {
+      const params = new URLSearchParams({ q, domain });
+      const jobsData = await fetchApiEnvelope<JobsApiData>(`/api/jobs?${params}`, {
+        headers: { ...apiTenantHeaders(apiTenantId) }
+      });
+      setDbJobs(jobsData.jobs);
+      const apps = await fetchApiEnvelope<ApplicationRecord[]>("/api/applications", {
+        headers: { ...apiTenantHeaders(apiTenantId) }
+      });
+      setDbApplications(apps);
+    } catch (err) {
+      setServerIndexError(err instanceof Error ? err.message : "Unable to load jobs or applications from the API.");
+    } finally {
+      setServerIndexLoading(false);
+    }
+  }
 
   function saveProfile(profileUpdate: CandidateApplicationProfile) {
     const exists = candidateProfiles.some((item) => item.userId === profileUpdate.userId);
     setCandidateProfiles(exists ? candidateProfiles.map((item) => item.userId === profileUpdate.userId ? profileUpdate : item) : [profileUpdate, ...candidateProfiles]);
   }
 
-  function refreshJobs() {
+  function syncConnectorDemo() {
     const nextRoles = syncJobsForCandidate(profile, syncedRoles, syncCycle);
     setSyncedRoles(nextRoles);
     setSyncCycle(syncCycle + 1);
     setLastSync(new Date().toLocaleTimeString());
   }
+
+  function refreshJobs() {
+    syncConnectorDemo();
+    void loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim());
+  }
+
+  useEffect(() => {
+    setJobSearchInput("");
+    setJobDomainInput("");
+    void loadServerJobIndex("", "");
+  }, [apiTenantId]);
 
   useEffect(() => {
     if (!candidateProfiles.some((item) => item.userId === currentUser.id)) {
@@ -1890,7 +1968,7 @@ function JobsAndApplications({
   }, [candidateProfiles, currentUser.id, profile, setCandidateProfiles]);
 
   useEffect(() => {
-    refreshJobs();
+    syncConnectorDemo();
     const interval = window.setInterval(() => {
       const storedProfiles = JSON.parse(window.localStorage.getItem("lp-candidate-profiles") || "[]") as CandidateApplicationProfile[];
       const latestProfile = storedProfiles.find((item) => item.userId === currentUser.id) || profile;
@@ -1913,7 +1991,8 @@ function JobsAndApplications({
     });
   }
 
-  function prepareApplication(role: SyncedRole) {
+  async function prepareApplication(role: SyncedRole) {
+    setPrepareApiError(null);
     const record = createAppliedRoleRecord({
       userId: currentUser.id,
       role,
@@ -1921,14 +2000,46 @@ function JobsAndApplications({
       resume: result
     });
     setAppliedRoles([record, ...appliedRoles]);
-    setSyncedRoles(syncedRoles.map((item) => item.id === role.id ? { ...item, status: "prepared" } : item));
-    setUsers(users.map((user) => user.id === currentUser.id ? {
-        ...user,
-        usage: {
-          ...user.usage,
-          jobApplications: user.usage.jobApplications + 1
-        }
-      } : user));
+    setSyncedRoles(syncedRoles.map((item) => (item.id === role.id ? { ...item, status: "prepared" } : item)));
+    setUsers(
+      users.map((user) =>
+        user.id === currentUser.id
+          ? {
+              ...user,
+              usage: {
+                ...user.usage,
+                jobApplications: user.usage.jobApplications + 1
+              }
+            }
+          : user
+      )
+    );
+
+    const catalogJobId = matchSyncedRoleToCatalogJobId(role);
+    if (!catalogJobId) {
+      setPrepareApiError(
+        "This demo role does not match a seeded catalog job — prepared locally only. Add a matching row in JOB_LISTINGS to persist to Postgres."
+      );
+      return;
+    }
+    const resumeLegacy = pickSeededResumeLegacyId(profile.primaryResumeId);
+    try {
+      await fetchApiEnvelope<ApplicationRecord>("/api/applications", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...apiTenantHeaders(apiTenantId)
+        },
+        body: JSON.stringify({
+          jobId: catalogJobId,
+          resumeId: resumeLegacy,
+          status: "Saved"
+        })
+      });
+      await loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim());
+    } catch (err) {
+      setPrepareApiError(err instanceof Error ? err.message : "Could not save application to the database.");
+    }
   }
 
   return (
@@ -1938,12 +2049,107 @@ function JobsAndApplications({
           <Search size={17} />
           <input placeholder="Search normalized jobs" value={profile.keywords.join(", ")} readOnly />
         </div>
-        <button className="icon-button text" onClick={refreshJobs}>
+        <button type="button" className="icon-button text" onClick={refreshJobs}>
           <RefreshCw size={17} />
           Refresh Now
         </button>
         <Pill tone="green">auto refresh every 1 minute</Pill>
         <Pill tone="blue">last sync: {lastSync}</Pill>
+      </section>
+
+      {prepareApiError ? <div className="error-banner">{prepareApiError}</div> : null}
+
+      <section className="panel">
+        <SectionTitle icon={DatabaseZap} title="Tenant job index (PostgreSQL)" />
+        <p className="profile-note">
+          Live search against seeded jobs in your tenant database. Connector cards below remain the deterministic demo sync.
+        </p>
+        {serverIndexError ? <div className="error-banner">{serverIndexError}</div> : null}
+        {serverIndexLoading ? <p className="muted">Loading server index…</p> : null}
+        <div className="toolbar-line">
+          <label className="stacked">
+            <span>Search index</span>
+            <input
+              value={jobSearchInput}
+              onChange={(event) => setJobSearchInput(event.target.value)}
+              placeholder="Title, company, location, domain"
+            />
+          </label>
+          <label className="stacked">
+            <span>Domain filter</span>
+            <input
+              value={jobDomainInput}
+              onChange={(event) => setJobDomainInput(event.target.value)}
+              placeholder="e.g. Technology"
+            />
+          </label>
+          <button
+            type="button"
+            className="icon-button text"
+            onClick={() => void loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim())}
+          >
+            <Search size={17} />
+            Search index
+          </button>
+        </div>
+        <div className="job-grid">
+          {dbJobs.slice(0, 12).map((job) => (
+            <article className="job-card" key={job.id}>
+              <div>
+                <Pill tone="blue">{job.source}</Pill>
+                <Pill tone="green">{job.applyMode}</Pill>
+              </div>
+              <h3>{job.title}</h3>
+              <p>
+                {job.company} | {job.location}
+              </p>
+              <div className="job-skills">
+                {job.skills.slice(0, 7).map((skill) => (
+                  <span key={skill}>{skill}</span>
+                ))}
+              </div>
+              <footer>
+                <strong>{job.normalizedScore}% fit</strong>
+                <small className="job-note">Posted {job.postedAt}</small>
+              </footer>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <SectionTitle icon={FileCheck2} title="Applications in database" />
+        <p className="profile-note">Rows from `GET /api/applications` for your signed-in user (or full tenant for admins).</p>
+        <div className="data-table apps">
+          <div className="data-row header">
+            <span>Job id</span>
+            <span>Resume id</span>
+            <span>Status</span>
+            <span>ATS</span>
+            <span>Applied</span>
+          </div>
+          {dbApplications.length === 0 ? (
+            <div className="data-row">
+              <span>No applications returned yet.</span>
+            </div>
+          ) : (
+            dbApplications.slice(0, 20).map((row) => (
+              <div className="data-row" key={row.id}>
+                <span>
+                  <strong className="truncate">{row.jobId}</strong>
+                </span>
+                <span>
+                  <small>{row.resumeId}</small>
+                </span>
+                <span>
+                  <Pill tone="amber">{row.status}</Pill>
+                </span>
+                <span>{row.atsScore}</span>
+                <span>{row.appliedAt}</span>
+              </div>
+            ))
+          )}
+        </div>
       </section>
 
       <section className="panel">
@@ -1996,7 +2202,12 @@ function JobsAndApplications({
             </div>
             <footer>
               <strong>{role.matchScore}% match</strong>
-              <button className="icon-button" onClick={() => prepareApplication(role)} title="Prepare application">
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => void prepareApplication(role)}
+                title="Prepare application"
+              >
                 <Link2 size={16} />
               </button>
             </footer>
@@ -2049,14 +2260,32 @@ function TenantJobActivity({
   users,
   candidateProfiles,
   syncedRoles,
-  appliedRoles
+  appliedRoles,
+  apiTenantId
 }: {
   currentUser: PortalUser;
   users: PortalUser[];
   candidateProfiles: CandidateApplicationProfile[];
   syncedRoles: SyncedRole[];
   appliedRoles: AppliedRoleRecord[];
+  apiTenantId: string | null;
 }) {
+  const [tenantDbApplications, setTenantDbApplications] = useState<ApplicationRecord[]>([]);
+  const [tenantAppsError, setTenantAppsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      setTenantAppsError(null);
+      try {
+        const apps = await fetchApiEnvelope<ApplicationRecord[]>("/api/applications", {
+          headers: { ...apiTenantHeaders(apiTenantId) }
+        });
+        setTenantDbApplications(apps);
+      } catch (err) {
+        setTenantAppsError(err instanceof Error ? err.message : "Unable to load applications from the API.");
+      }
+    })();
+  }, [apiTenantId]);
   const tenantId = currentUser.tenantId;
   const tenantCandidates = users.filter((user) =>
     user.tenantId === tenantId && (user.role === "TENANT_CANDIDATE" || user.role === "RECRUITER")
@@ -2069,6 +2298,42 @@ function TenantJobActivity({
 
   return (
     <div className="screen-stack">
+      <section className="panel">
+        <SectionTitle icon={FileCheck2} title="Applications in database (tenant scope)" />
+        {tenantAppsError ? <div className="error-banner">{tenantAppsError}</div> : null}
+        <p className="profile-note">Results from `GET /api/applications` for your tenant (admins see all rows).</p>
+        <div className="data-table apps">
+          <div className="data-row header">
+            <span>User id</span>
+            <span>Job id</span>
+            <span>Status</span>
+            <span>ATS</span>
+            <span>Applied</span>
+          </div>
+          {tenantDbApplications.length === 0 ? (
+            <div className="data-row">
+              <span>No applications returned yet.</span>
+            </div>
+          ) : (
+            tenantDbApplications.slice(0, 30).map((row) => (
+              <div className="data-row" key={row.id}>
+                <span>
+                  <small>{row.userId}</small>
+                </span>
+                <span>
+                  <strong className="truncate">{row.jobId}</strong>
+                </span>
+                <span>
+                  <Pill tone="amber">{row.status}</Pill>
+                </span>
+                <span>{row.atsScore}</span>
+                <span>{row.appliedAt}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
       <section className="metric-grid">
         <MetricCard label="Tracked Candidates" value={`${tenantCandidates.length}`} sublabel="company job-search users" icon={Users} />
         <MetricCard label="Matched Roles" value={`${tenantSyncedRoles.filter((role) => role.status !== "excluded").length}`} sublabel="candidate-filtered listings" icon={BriefcaseBusiness} tone="teal" />
@@ -2764,6 +3029,7 @@ function Architecture() {
 }
 
 export default function ProductionPortalApp() {
+  const { data: session, status } = useSession();
   const [users, setUsers] = usePersistentState<PortalUser[]>("lp-users", PORTAL_USERS);
   const [tenants, setTenants] = usePersistentState<Tenant[]>("lp-tenants", PORTAL_TENANTS);
   const [companyRoles, setCompanyRoles] = usePersistentState<CompanyRole[]>("lp-company-roles", COMPANY_ROLES);
@@ -2779,6 +3045,28 @@ export default function ProductionPortalApp() {
   const [sessionUserId, setSessionUserId] = usePersistentState<string | null>("lp-session-user", null);
   const [activeTab, setActiveTab] = useState<TabId>("command");
   const [result, setResult] = useState<ResumeGenerationResult | null>(null);
+
+  const apiTenantId = session?.user?.tenantId ?? null;
+
+  useEffect(() => {
+    if (status === "loading") {
+      return;
+    }
+    const portalKey = session?.user?.portalKey;
+    if (portalKey) {
+      setSessionUserId(portalKey);
+    } else if (status === "unauthenticated") {
+      setSessionUserId(null);
+    }
+  }, [session?.user?.portalKey, status, setSessionUserId]);
+
+  if (status === "loading") {
+    return (
+      <main className="auth-shell">
+        <p className="muted">Loading session…</p>
+      </main>
+    );
+  }
 
   const currentUser = useMemo(
     () => users.find((user) => user.id === sessionUserId) || null,
@@ -2891,7 +3179,13 @@ export default function ProductionPortalApp() {
           })}
         </nav>
 
-        <button className="sidebar-logout" onClick={() => setSessionUserId(null)}>
+        <button
+          type="button"
+          className="sidebar-logout"
+          onClick={() => {
+            void signOut({ redirect: false }).then(() => setSessionUserId(null));
+          }}
+        >
           <LogOut size={17} />
           Sign out
         </button>
@@ -2920,14 +3214,32 @@ export default function ProductionPortalApp() {
         {activeTab === "tenant-candidates" ? <TenantAdmin view="tenant-candidates" {...tenantAdminProps} /> : null}
         {activeTab === "tenant-templates" ? <TenantAdmin view="tenant-templates" {...tenantAdminProps} /> : null}
         {activeTab === "tenant-usage" ? <TenantAdmin view="tenant-usage" {...tenantAdminProps} /> : null}
-        {activeTab === "candidate" ? <CandidateDesk currentUser={currentUser} users={users} setUsers={setUsers} ledger={ledger} setLedger={setLedger} candidateProfiles={candidateProfiles} setCandidateProfiles={setCandidateProfiles} resumeTemplates={resumeTemplates} setResumeTemplates={setResumeTemplates} templateLimits={templateLimits} resumeRuns={resumeRuns} setResumeRuns={setResumeRuns} result={result} setResult={setResult} /> : null}
+        {activeTab === "candidate" ? (
+          <CandidateDesk
+            currentUser={currentUser}
+            users={users}
+            setUsers={setUsers}
+            ledger={ledger}
+            setLedger={setLedger}
+            candidateProfiles={candidateProfiles}
+            setCandidateProfiles={setCandidateProfiles}
+            resumeTemplates={resumeTemplates}
+            setResumeTemplates={setResumeTemplates}
+            templateLimits={templateLimits}
+            resumeRuns={resumeRuns}
+            setResumeRuns={setResumeRuns}
+            result={result}
+            setResult={setResult}
+            apiTenantId={apiTenantId}
+          />
+        ) : null}
         {activeTab === "mail" ? <MailCenter currentUser={currentUser} users={users} setUsers={setUsers} threads={threads} setThreads={setThreads} /> : null}
         {ADMIN_OPS_TABS.includes(activeTab) ? <AdminOps view={activeTab} reviewQueue={reviewQueue} setReviewQueue={setReviewQueue} /> : null}
         {activeTab === "repository" ? <Repository /> : null}
         {activeTab === "jobs" ? (
           isCompanyAdmin
-            ? <TenantJobActivity currentUser={currentUser} users={users} candidateProfiles={candidateProfiles} syncedRoles={syncedRoles} appliedRoles={appliedRoles} />
-            : <JobsAndApplications currentUser={currentUser} users={users} setUsers={setUsers} candidateProfiles={candidateProfiles} setCandidateProfiles={setCandidateProfiles} syncedRoles={syncedRoles} setSyncedRoles={setSyncedRoles} appliedRoles={appliedRoles} setAppliedRoles={setAppliedRoles} result={result} />
+            ? <TenantJobActivity currentUser={currentUser} users={users} candidateProfiles={candidateProfiles} syncedRoles={syncedRoles} appliedRoles={appliedRoles} apiTenantId={apiTenantId} />
+            : <JobsAndApplications currentUser={currentUser} users={users} setUsers={setUsers} candidateProfiles={candidateProfiles} setCandidateProfiles={setCandidateProfiles} syncedRoles={syncedRoles} setSyncedRoles={setSyncedRoles} appliedRoles={appliedRoles} setAppliedRoles={setAppliedRoles} result={result} apiTenantId={apiTenantId} />
         ) : null}
         {activeTab === "billing" ? <Billing currentUser={currentUser} users={users} tenants={tenants} ledger={ledger} setLedger={setLedger} /> : null}
         {activeTab === "architecture" ? <Architecture /> : null}

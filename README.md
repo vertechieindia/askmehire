@@ -17,22 +17,46 @@ AI-powered Resume Intelligence Operating System for ATS-aligned, domain-aware re
 - Deterministic resume intelligence engine for JD canonicalization, role detection, domain mapping, skill normalization, component retrieval, timeline checks, scoring, and explainability.
 - API routes for resume generation, reusable component review, job discovery, and application tracking.
 - Seeded role catalog, domain profiles, technology timelines, reusable resume components, jobs, applications, prompt versions, and audit events.
-- Production database contract in `database/schema.sql`.
+- Production database contract in `database/schema.sql` (kept in sync with Prisma; additive columns documented in `docs/MIGRATION_PLAN.md`).
 - Architecture notes in `docs/ARCHITECTURE.md`.
+- Phase 1 production foundation: Prisma + PostgreSQL repositories, service layer, Zod validation, API envelope, rate limiting, OpenTelemetry hook, BullMQ enqueue bridge, S3 storage adapter, Docker assets (`Dockerfile`, `docker-compose.yml`), and `docs/MIGRATION_PLAN.md` + ADRs.
 
-## Run locally
+## Production-style local setup (PostgreSQL)
+
+1. Copy `.env.example` to `.env` and set secrets for your environment.
+2. Start dependencies:
+
+```bash
+docker compose up -d postgres redis
+```
+
+3. Apply migrations and seed catalog-backed rows:
+
+```bash
+npx prisma migrate deploy
+npm run db:seed
+```
+
+4. Run the app:
+
+```bash
+npm run dev
+```
+
+JSON API responses use `{ success, data, error, requestId }`. The UI unwraps this automatically for resume generation. Until Phase 2 auth ships, set `DEFAULT_TENANT_ID` to the UUID printed at the end of `npm run db:seed` (also shown in `.env.example` for the bootstrap tenant).
+
+### Health & workers
+
+- `GET /api/health` — liveness + database probe.
+- Async worker entry: `npm run worker` (requires `REDIS_URL`; processes the default BullMQ queue).
+
+## Run locally (UI-only / without Docker)
+
+You still need a reachable `DATABASE_URL` for API routes that persist data. For a quick UI spin without Postgres, the portal continues to use `localStorage`, but `/api/*` calls that hit the database will fail until Postgres is available.
 
 ```bash
 npm install
 npm run dev
-```
-
-Open `http://localhost:3000`.
-
-If port `3000` is busy, run:
-
-```bash
-npm run dev -- --port 3001
 ```
 
 ## Seeded sign-in accounts
@@ -46,6 +70,8 @@ Admin Ops: ops@askmehire.com / Ops@123
 
 ## API routes
 
+JSON routes return an envelope: `{ success, data, error, requestId }`. `POST /api/resume-docx` returns binary on success and JSON errors using the same envelope.
+
 ```text
 POST /api/generate
 POST /api/job-sync
@@ -54,10 +80,11 @@ POST /api/components
 GET  /api/jobs
 GET  /api/applications
 POST /api/applications
+GET  /api/health
 ```
 
-The current implementation uses in-memory seeded data. The database schema is ready for PostgreSQL plus pgvector.
+Persistence is backed by PostgreSQL via Prisma. The interactive portal still persists demo workflow state in browser `localStorage` until Phase 3 moves that state server-side.
 
-The interactive portal persists demo workflow state in browser localStorage. Production deployment should wire the same models to the PostgreSQL schema, managed authentication, an email provider, payment provider, queue, and object storage.
+Production deployment should add managed authentication, an email provider, payment provider, Redis-backed rate limits (for multi-instance), and object storage for large artifacts.
 
 The connector layer is intentionally API-first and human-assisted. It prepares safe searches and application payloads, avoids aggressive hidden automation, and keeps each portal account isolated so one connector issue does not risk every user account.

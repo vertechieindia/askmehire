@@ -11,12 +11,15 @@ Job discovery now runs through a connector registry covering Recruut, Dice, OPTn
 ## Runtime modules
 
 ```text
-Next.js Frontend
-  -> API Routes
-  -> Resume Intelligence Engine
-  -> In-memory Seed Store
-  -> PostgreSQL + pgvector contract
+Next.js Frontend (React)
+  -> SessionProvider + ProductionPortalApp
+  -> API Routes (JSON envelope + binary resume-docx)
+  -> NextAuth (JWT credentials) + middleware (JWT on /api/*)
+  -> Prisma repositories + services (PostgreSQL)
+  -> Deterministic resume-engine + job-integrations (catalog + connector demo)
 ```
+
+PostgreSQL holds tenants, users (with `portal_key`, password hash), components, jobs, applications, resumes, audit events, etc. The **connector job grid** in the UI still merges deterministic `syncJobsForCandidate` output with **optional** reads from `GET /api/jobs` for the canonical index.
 
 ## Resume intelligence pipeline
 
@@ -123,10 +126,10 @@ Admin Ops
 
 ## Production adapter boundaries
 
-The current app is runnable without external credentials. For production, replace the local browser persistence adapters with:
+The current app is runnable without external credentials. For production hardening, extend or replace the baseline below:
 
-- Auth: Clerk, Auth0, or custom JWT plus HTTP-only cookies
-- Database: PostgreSQL with pgvector using `database/schema.sql`
+- **Auth:** NextAuth JWT credentials + Argon2 are implemented; consider **Clerk, Auth0, or enterprise SSO** and stricter cookie/CSRF policy.
+- **Database:** PostgreSQL with pgvector using `database/schema.sql` / Prisma migrations
 - Email: Gmail/Outlook connector, SendGrid, Postmark, or SES
 - Billing: Stripe subscriptions and metered billing
 - Queues: Redis or Temporal-backed async orchestration

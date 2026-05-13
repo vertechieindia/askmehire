@@ -278,9 +278,15 @@ function roleFamily(role: string) {
   return "general";
 }
 
-function rankComponents(role: RoleName, domain: DomainName, skills: string[], jd: string) {
+function rankComponents(
+  role: RoleName,
+  domain: DomainName,
+  skills: string[],
+  jd: string,
+  components: ResumeComponent[]
+) {
   const skillSet = new Set(skills.map(normalize));
-  const compatibleComponents = INTELLIGENCE_COMPONENTS.filter(
+  const compatibleComponents = components.filter(
     (component) => {
       if (!["approved", "published"].includes(component.status)) {
         return false;
@@ -322,6 +328,11 @@ function rankComponents(role: RoleName, domain: DomainName, skills: string[], jd
 
   return ranked.slice(0, 8).map((item) => item.component);
 }
+
+export type GenerateResumeOptions = {
+  /** When provided and non-empty, used as the intelligence repository for retrieval instead of the bundled catalog. */
+  intelligenceComponents?: ResumeComponent[];
+};
 
 function findTimelineWarnings(text: string, skills: string[]) {
   const warnings: string[] = [];
@@ -558,12 +569,16 @@ function detectSkillGaps(jdSkills: string[], resumeText: string) {
   return jdSkills.filter((skill) => !normalizedResume.includes(normalize(skill))).slice(0, 8);
 }
 
-export function generateResume(request: ResumeGenerationRequest): ResumeGenerationResult {
+export function generateResume(request: ResumeGenerationRequest, options?: GenerateResumeOptions): ResumeGenerationResult {
+  const componentSource =
+    options?.intelligenceComponents && options.intelligenceComponents.length > 0
+      ? options.intelligenceComponents
+      : INTELLIGENCE_COMPONENTS;
   const canonicalJD = canonicalizeJD(request.jobDescription);
   const detectedSkills = extractSkills(`${canonicalJD}\n${request.targetTitle}`);
   const role = detectRole(canonicalJD, request.targetTitle);
   const domain = detectDomain(canonicalJD);
-  const selectedComponents = rankComponents(role, domain, detectedSkills, canonicalJD);
+  const selectedComponents = rankComponents(role, domain, detectedSkills, canonicalJD, componentSource);
   const timelineChecks = findTimelineWarnings(`${request.resumeText}\n${canonicalJD}`, detectedSkills);
   const warnings = [...timelineChecks];
   const resumeMarkdown = assembleResume(request, role, domain, detectedSkills, selectedComponents, warnings);
@@ -595,14 +610,20 @@ export function generateResume(request: ResumeGenerationRequest): ResumeGenerati
   };
 }
 
-export function reviewComponentDraft(draft: Pick<ResumeComponent, "role" | "technology" | "domain" | "timelineStart" | "timelineEnd" | "intent" | "baseLogic">) {
-  const exactDuplicate = INTELLIGENCE_COMPONENTS.find((component) => normalize(component.baseLogic) === normalize(draft.baseLogic));
-  const semanticMatch = INTELLIGENCE_COMPONENTS.map((component) => ({
-    component,
-    score: tokenOverlap(component.baseLogic, draft.baseLogic)
-  })).sort((a, b) => b.score - a.score)[0];
+export function reviewComponentDraft(
+  draft: Pick<ResumeComponent, "role" | "technology" | "domain" | "timelineStart" | "timelineEnd" | "intent" | "baseLogic">,
+  options?: { comparisonCatalog?: ResumeComponent[] }
+) {
+  const catalog = options?.comparisonCatalog?.length ? options.comparisonCatalog : INTELLIGENCE_COMPONENTS;
+  const exactDuplicate = catalog.find((component) => normalize(component.baseLogic) === normalize(draft.baseLogic));
+  const semanticMatch = catalog
+    .map((component) => ({
+      component,
+      score: tokenOverlap(component.baseLogic, draft.baseLogic)
+    }))
+    .sort((a, b) => b.score - a.score)[0];
 
-  const intentCollision = INTELLIGENCE_COMPONENTS.find(
+  const intentCollision = catalog.find(
     (component) =>
       component.role === draft.role &&
       component.technology === draft.technology &&

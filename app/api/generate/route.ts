@@ -1,37 +1,18 @@
-import { NextResponse } from "next/server";
-import { generateResume } from "@/lib/resume-engine";
-import type { ResumeGenerationRequest } from "@/lib/types";
+import { handleJsonApi, parseJsonBody } from "@/lib/http/with-api-handler";
+import { resumeGenerationRequestSchema } from "@/validators/api-schemas";
+import { ResumeGenerationService } from "@/services/resume-generation.service";
+import { requirePermission } from "@/lib/auth/rbac";
+
+const resumeGenerationService = new ResumeGenerationService();
 
 export async function POST(request: Request) {
-  try {
-    const body = (await request.json()) as ResumeGenerationRequest;
-
-    if (!body.jobDescription || body.jobDescription.trim().length < 40) {
-      return NextResponse.json(
-        { error: "A usable job description is required." },
-        { status: 400 }
-      );
-    }
-
-    const result = generateResume({
-      fullName: body.fullName || "Candidate Name",
-      targetTitle: body.targetTitle || "Data Engineer",
-      email: body.email || "candidate@example.com",
-      phone: body.phone || "(555) 010-2048",
-      linkedin: body.linkedin || "linkedin.com/in/candidate",
-      resumeText: body.resumeText || "",
-      jobDescription: body.jobDescription,
-      strategy: body.strategy || "recruiter-readable"
-    });
-
-    return NextResponse.json(result);
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: "Resume generation failed.",
-        detail: error instanceof Error ? error.message : "Unknown error"
-      },
-      { status: 500 }
-    );
-  }
+  return handleJsonApi(
+    request,
+    async (req, ctx) => {
+      requirePermission(ctx.role, "candidate:generate_resume");
+      const body = await parseJsonBody(req, resumeGenerationRequestSchema);
+      return resumeGenerationService.generate(body, ctx);
+    },
+    { rateLimitKey: "api:generate" }
+  );
 }

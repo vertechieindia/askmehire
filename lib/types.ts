@@ -78,6 +78,17 @@ export interface JobListing {
   applyMode: "human_assisted" | "connector_ready" | "manual";
 }
 
+/** Response shape of `GET /api/jobs` (envelope `data`). */
+export interface JobsApiData {
+  jobs: JobListing[];
+  sourceCoverage: string[];
+  antiSpamPolicy: {
+    mode: string;
+    rateLimit: string;
+    automationBoundary: string;
+  };
+}
+
 export interface ApplicationRecord {
   id: string;
   jobId: string;
