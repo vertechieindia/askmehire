@@ -1,7 +1,7 @@
 # Project status — askmehire
 
 **Last updated:** May 2026  
-**Purpose:** Single place for **what is done** vs **what is pending** relative to the product vision (see [BRD.md](./BRD.md), [FSD.md](./FSD.md), [TDD.md](./TDD.md)).
+**Purpose:** Single place for **what is done** vs **what is pending** relative to the product vision (see [BRD.md](./BRD.md), [FSD.md](./FSD.md), [TDD.md](./TDD.md)). For **production gaps, roadmap, hardening, and exec-level planning**, see [PRODUCTION_MASTER_PLAN.md](./PRODUCTION_MASTER_PLAN.md).
 
 > **Recent:** NextAuth (JWT credentials, Argon2), API auth middleware, server RBAC, **Jobs** tab wired to `GET /api/jobs` / `GET /api/applications`, and **Prepare application** calls `POST /api/applications` when the synced role matches `JOB_LISTINGS` (see `lib/job-catalog-match.ts`). ADR: [0003-nextauth-jwt-rbac.md](./adr/0003-nextauth-jwt-rbac.md).
 
@@ -60,6 +60,7 @@ Legend: **Done** = implemented in this repo in a runnable way. **Partial** = sta
 - `README.md` — production-style Postgres setup, API envelope, health/worker notes.
 - `docs/ARCHITECTURE.md` — product shape, pipeline, services, DB contract overview.
 - `docs/BRD.md`, `docs/FSD.md`, `docs/TDD.md`, `docs/STATUS.md` (this file).
+- **`docs/PRODUCTION_MASTER_PLAN.md`** — gap analysis, roadmap, hardening, exec summary, connectors, vectors, billing, email, CI/SOC2-oriented checklist, deployment and cost bands, Jira-style epics and estimates.
 - `docs/MIGRATION_PLAN.md` — Phase 1 migration notes.
 - `docs/adr/0001-prisma-postgres.md`, `docs/adr/0002-api-envelope.md`, `docs/adr/0003-nextauth-jwt-rbac.md`.
 

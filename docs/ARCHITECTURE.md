@@ -145,3 +145,5 @@ Queue: Redis
 Storage: S3 or Cloudflare R2
 Observability: OpenTelemetry plus AI cost and failure dashboards
 ```
+
+For phased delivery, gap analysis, and cost bands, see [PRODUCTION_MASTER_PLAN.md](./PRODUCTION_MASTER_PLAN.md).
