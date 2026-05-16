@@ -3060,14 +3060,6 @@ export default function ProductionPortalApp() {
     }
   }, [session?.user?.portalKey, status, setSessionUserId]);
 
-  if (status === "loading") {
-    return (
-      <main className="auth-shell">
-        <p className="muted">Loading session…</p>
-      </main>
-    );
-  }
-
   const currentUser = useMemo(
     () => users.find((user) => user.id === sessionUserId) || null,
     [sessionUserId, users]
@@ -3129,6 +3121,14 @@ export default function ProductionPortalApp() {
       setCandidateProfiles([...missingProfiles, ...candidateProfiles]);
     }
   }, [candidateProfiles, setCandidateProfiles, users]);
+
+  if (status === "loading") {
+    return (
+      <main className="auth-shell">
+        <p className="muted">Loading session…</p>
+      </main>
+    );
+  }
 
   if (!currentUser) {
     return <SignInScreen onSignIn={(userId) => setSessionUserId(userId)} />;
