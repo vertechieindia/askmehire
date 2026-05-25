@@ -15,6 +15,7 @@ async function main() {
   const tenantId = SEED_IDS.tenant;
   const tenantNorthstarId = SEED_IDS.tenantNorthstar;
   const demoUserId = SEED_IDS.demoUser;
+  const technologyNames = new Set(TECHNOLOGY_TIMELINES.map((tech) => tech.name));
 
   await prisma.tenant.upsert({
     where: { id: tenantId },
@@ -176,6 +177,10 @@ async function main() {
   }
 
   for (const c of INTELLIGENCE_COMPONENTS) {
+    if (!technologyNames.has(c.technology)) {
+      throw new Error(`Missing technology timeline for component ${c.id}: ${c.technology}`);
+    }
+
     const id = SEED_IDS.component(c.id);
     const roleId = SEED_IDS.role(c.role);
     const techId = SEED_IDS.technology(c.technology);

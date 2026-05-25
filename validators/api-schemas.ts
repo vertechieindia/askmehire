@@ -86,8 +86,43 @@ export const resumeDocxRequestSchema = z.object({
     email: z.string(),
     phone: z.string(),
     linkedin: z.string(),
-    summary: z.array(z.string()),
-    skillMatrix: z.array(z.object({ heading: z.string(), lines: z.array(z.string()) })),
-    clients: z.array(z.any()).min(1)
+    clients: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          clientName: z.string().min(1),
+          location: z.string(),
+          timeline: z.string(),
+          jobTitle: z.string()
+        })
+      )
+      .min(1)
   })
+});
+
+const mailThreadStatusSchema = z.enum([
+  "draft",
+  "approval_requested",
+  "approved",
+  "sent",
+  "incoming",
+  "reply_drafted"
+]);
+
+export const mailThreadCreateSchema = z.object({
+  jobId: z.string().optional(),
+  contactName: z.string().min(1),
+  contactEmail: z.string().email(),
+  company: z.string().optional(),
+  subject: z.string().min(1),
+  draft: z.string().min(1)
+});
+
+export const mailThreadStatusUpdateSchema = z.object({
+  threadId: z.string().uuid(),
+  status: mailThreadStatusSchema
+});
+
+export const mailSendSchema = z.object({
+  threadId: z.string().uuid()
 });

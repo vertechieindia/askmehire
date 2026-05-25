@@ -1,5 +1,4 @@
 -- Enable pgvector (required for embedding columns)
-CREATE EXTENSION IF NOT EXISTS vector;
 
 -- CreateTable
 CREATE TABLE "tenants" (
