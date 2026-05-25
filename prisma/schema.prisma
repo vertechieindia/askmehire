@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // --- Core tenancy & identity (contract: database/schema.sql + additive columns) ---
@@ -44,8 +45,10 @@ model User {
 
   tenant Tenant? @relation(fields: [tenantId], references: [id])
 
-  resumes      Resume[]
-  applications Application[]
+  resumes         Resume[]
+  applications    Application[]
+  gmailConnection   GmailConnection?
+  outlookConnection OutlookConnection?
 
   @@index([tenantId, role, status], map: "users_tenant_role_idx")
   @@map("users")
@@ -336,11 +339,47 @@ model MailThread {
   draft             String?
   approvedById      String?  @map("approved_by") @db.Uuid
   providerMessageId String?  @map("provider_message_id")
+  providerThreadId  String?  @map("provider_thread_id")
+  provider          String?  @map("provider")
   updatedAt         DateTime @updatedAt @map("updated_at")
   createdAt         DateTime @default(now()) @map("created_at")
 
   @@index([tenantId, userId, status], map: "mail_threads_user_status_idx")
+  @@index([userId, providerThreadId], map: "mail_threads_provider_thread_idx")
   @@map("mail_threads")
+}
+
+model GmailConnection {
+  id                     String    @id @db.Uuid
+  userId                 String    @unique @map("user_id") @db.Uuid
+  tenantId               String?   @map("tenant_id") @db.Uuid
+  gmailAddress           String    @map("gmail_address")
+  refreshTokenEncrypted  String    @map("refresh_token_encrypted")
+  historyId              String?   @map("history_id")
+  lastSyncAt             DateTime? @map("last_sync_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId], map: "gmail_connections_tenant_idx")
+  @@map("gmail_connections")
+}
+
+model OutlookConnection {
+  id                     String    @id @db.Uuid
+  userId                 String    @unique @map("user_id") @db.Uuid
+  tenantId               String?   @map("tenant_id") @db.Uuid
+  outlookAddress         String    @map("outlook_address")
+  refreshTokenEncrypted  String    @map("refresh_token_encrypted")
+  lastSyncAt             DateTime? @map("last_sync_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId], map: "outlook_connections_tenant_idx")
+  @@map("outlook_connections")
 }
 
 model BillingLedger {

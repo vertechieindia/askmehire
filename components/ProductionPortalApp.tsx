@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSession, signIn, signOut, useSession } from "next-auth/react";
 import {
   Activity,
@@ -2397,19 +2397,71 @@ function TenantJobActivity({
   );
 }
 
+type GmailStatus =
+  | { connected: false }
+  | { connected: true; gmailAddress: string; lastSyncAt: string | null };
+
+type OutlookStatus =
+  | { connected: false }
+  | { connected: true; outlookAddress: string; lastSyncAt: string | null };
+
 function MailCenter({
   currentUser,
+  sessionDbUserId,
   users,
   setUsers,
   threads,
   setThreads
 }: {
   currentUser: PortalUser;
+  sessionDbUserId: string | null;
   users: PortalUser[];
   setUsers: (users: PortalUser[]) => void;
   threads: MailThread[];
   setThreads: (threads: MailThread[]) => void;
 }) {
+  const [gmailStatus, setGmailStatus] = useState<GmailStatus>({ connected: false });
+  const [outlookStatus, setOutlookStatus] = useState<OutlookStatus>({ connected: false });
+  const [mailBusy, setMailBusy] = useState(false);
+  const [mailNotice, setMailNotice] = useState<string | null>(null);
+
+  const mailConnected = gmailStatus.connected || outlookStatus.connected;
+
+  const loadGmailStatus = useCallback(async () => {
+    try {
+      const status = await fetchApiEnvelope<GmailStatus>("/api/integrations/gmail/status");
+      setGmailStatus(status);
+    } catch {
+      setGmailStatus({ connected: false });
+    }
+  }, []);
+
+  const loadOutlookStatus = useCallback(async () => {
+    try {
+      const status = await fetchApiEnvelope<OutlookStatus>("/api/integrations/outlook/status");
+      setOutlookStatus(status);
+    } catch {
+      setOutlookStatus({ connected: false });
+    }
+  }, []);
+
+  const loadThreadsFromApi = useCallback(async () => {
+    try {
+      const rows = await fetchApiEnvelope<MailThread[]>("/api/mail/threads");
+      if (rows.length > 0) {
+        setThreads(rows);
+      }
+    } catch {
+      // keep localStorage-backed threads when API is unavailable
+    }
+  }, [setThreads]);
+
+  useEffect(() => {
+    void loadGmailStatus();
+    void loadOutlookStatus();
+    void loadThreadsFromApi();
+  }, [currentUser.id, loadGmailStatus, loadOutlookStatus, loadThreadsFromApi]);
+
   const visibleThreads = currentUser.role === "SUPER_ADMIN"
     ? threads
     : currentUser.role === "TENANT_COMPANY_ADMIN"
@@ -2418,47 +2470,138 @@ function MailCenter({
         )
       : roleCan(currentUser, "email:approve")
         ? threads
-        : threads.filter((thread) => thread.userId === currentUser.id);
+        : threads.filter(
+            (thread) =>
+              thread.userId === currentUser.id || (sessionDbUserId ? thread.userId === sessionDbUserId : false)
+          );
   const canDraftOutreach = currentUser.role !== "TENANT_COMPANY_ADMIN" && currentUser.role !== "REVIEWER";
 
-  function createOutreach() {
+  async function createOutreach() {
     const job = JOB_LISTINGS[0];
-    const thread: MailThread = {
-      id: `mail-${Date.now()}`,
-      tenantId: currentUser.tenantId,
-      userId: currentUser.id,
-      jobId: job.id,
-      contactName: "Hiring Team",
-      contactEmail: `hiring@${job.company.toLowerCase().replace(/[^a-z0-9]/g, "")}.example`,
-      company: job.company,
-      subject: `${job.title} application follow-up`,
-      direction: "outbound",
-      status: "draft",
-      lastMessage: "Draft created from the tracked job and candidate resume context.",
-      draft: `Hi Hiring Team, I recently prepared a resume for the ${job.title} role at ${job.company}. My background maps to ${job.skills.slice(0, 4).join(", ")} and I would appreciate the chance to discuss the fit.`,
-      updatedAt: today()
-    };
-    setThreads([thread, ...threads]);
+    const contactEmail = `hiring@${job.company.toLowerCase().replace(/[^a-z0-9]/g, "")}.example`;
+    const draft = `Hi Hiring Team, I recently prepared a resume for the ${job.title} role at ${job.company}. My background maps to ${job.skills.slice(0, 4).join(", ")} and I would appreciate the chance to discuss the fit.`;
+    try {
+      const created = await fetchApiEnvelope<MailThread>("/api/mail/threads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobId: job.id,
+          contactName: "Hiring Team",
+          contactEmail,
+          company: job.company,
+          subject: `${job.title} application follow-up`,
+          draft
+        })
+      });
+      setThreads([created, ...threads]);
+      setMailNotice("Draft saved to the server.");
+    } catch (error) {
+      const thread: MailThread = {
+        id: `mail-${Date.now()}`,
+        tenantId: currentUser.tenantId,
+        userId: currentUser.id,
+        jobId: job.id,
+        contactName: "Hiring Team",
+        contactEmail,
+        company: job.company,
+        subject: `${job.title} application follow-up`,
+        direction: "outbound",
+        status: "draft",
+        lastMessage: "Draft created locally (API unavailable).",
+        draft,
+        updatedAt: today()
+      };
+      setThreads([thread, ...threads]);
+      setMailNotice(error instanceof Error ? error.message : "Could not save draft to API.");
+    }
   }
 
-  function setStatus(threadId: string, status: MailThread["status"], approvedBy?: string) {
-    setThreads(threads.map((thread) => thread.id === threadId ? {
-      ...thread,
-      status,
-      approvedBy,
-      updatedAt: today(),
-      lastMessage: status === "sent" ? "Email sent through the approved outbound queue." : thread.lastMessage
-    } : thread));
+  async function syncMail() {
+    setMailBusy(true);
+    setMailNotice(null);
+    try {
+      const result = await fetchApiEnvelope<{
+        imported: number;
+        contactCount: number;
+        gmailImported?: number;
+        outlookImported?: number;
+      }>("/api/mail/sync", {
+        method: "POST"
+      });
+      const parts = [
+        result.gmailImported ? `Gmail ${result.gmailImported}` : null,
+        result.outlookImported ? `Outlook ${result.outlookImported}` : null
+      ].filter(Boolean);
+      const detail = parts.length ? ` (${parts.join(", ")})` : "";
+      setMailNotice(`Mail sync complete — ${result.imported} messages for ${result.contactCount} contacts${detail}.`);
+      await loadThreadsFromApi();
+      await loadGmailStatus();
+      await loadOutlookStatus();
+    } catch (error) {
+      setMailNotice(error instanceof Error ? error.message : "Mail sync failed.");
+    } finally {
+      setMailBusy(false);
+    }
+  }
+
+  async function setStatus(threadId: string, status: MailThread["status"], approvedBy?: string) {
+    if (status === "sent" && mailConnected) {
+      setMailBusy(true);
+      try {
+        const updated = await fetchApiEnvelope<MailThread>("/api/mail/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId })
+        });
+        setThreads(threads.map((thread) => (thread.id === threadId ? updated : thread)));
+        setMailNotice("Email sent via connected mail provider.");
+      } catch (error) {
+        setMailNotice(error instanceof Error ? error.message : "Mail send failed.");
+      } finally {
+        setMailBusy(false);
+      }
+      return;
+    }
+
+    try {
+      const updated = await fetchApiEnvelope<MailThread>("/api/mail/threads", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId, status })
+      });
+      setThreads(threads.map((thread) => (thread.id === threadId ? { ...updated, approvedBy: approvedBy ?? updated.approvedBy } : thread)));
+    } catch {
+      setThreads(
+        threads.map((thread) =>
+          thread.id === threadId
+            ? {
+                ...thread,
+                status,
+                approvedBy,
+                updatedAt: today(),
+                lastMessage: status === "sent" ? "Email marked sent (demo — connect Gmail or Outlook to send for real)." : thread.lastMessage
+              }
+            : thread
+        )
+      );
+    }
 
     if (status === "approval_requested" || status === "sent") {
-      setUsers(users.map((user) => user.id === currentUser.id ? {
-        ...user,
-        usage: {
-          ...user.usage,
-          approvalsRequested: status === "approval_requested" ? user.usage.approvalsRequested + 1 : user.usage.approvalsRequested,
-          emailsSent: status === "sent" ? user.usage.emailsSent + 1 : user.usage.emailsSent
-        }
-      } : user));
+      setUsers(
+        users.map((user) =>
+          user.id === currentUser.id
+            ? {
+                ...user,
+                usage: {
+                  ...user.usage,
+                  approvalsRequested:
+                    status === "approval_requested" ? user.usage.approvalsRequested + 1 : user.usage.approvalsRequested,
+                  emailsSent: status === "sent" ? user.usage.emailsSent + 1 : user.usage.emailsSent
+                }
+              }
+            : user
+        )
+      );
     }
   }
 
@@ -2466,13 +2609,78 @@ function MailCenter({
     <div className="screen-stack">
       <section className="toolbar-line">
         {canDraftOutreach ? (
-          <button className="icon-button text" onClick={createOutreach}>
+          <button className="icon-button text" onClick={() => void createOutreach()}>
             <Mail size={17} />
             Draft Outreach
           </button>
         ) : null}
-        <Pill tone="blue">{currentUser.role === "TENANT_COMPANY_ADMIN" ? "tenant approval queue" : "incoming email tracking and approval workflow"}</Pill>
+        {gmailStatus.connected ? (
+          <>
+            <Pill tone="green">Gmail: {gmailStatus.gmailAddress}</Pill>
+            <button
+              type="button"
+              className="icon-button text"
+              disabled={mailBusy}
+              onClick={() => {
+                void fetch("/api/integrations/gmail", { method: "DELETE", credentials: "include" }).then(() => {
+                  setGmailStatus({ connected: false });
+                  setMailNotice("Gmail disconnected.");
+                });
+              }}
+            >
+              Disconnect Gmail
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="icon-button text"
+            onClick={() => {
+              window.location.href = "/api/integrations/gmail/connect";
+            }}
+          >
+            <Link2 size={17} />
+            Connect Gmail
+          </button>
+        )}
+        {outlookStatus.connected ? (
+          <>
+            <Pill tone="green">Outlook: {outlookStatus.outlookAddress}</Pill>
+            <button
+              type="button"
+              className="icon-button text"
+              disabled={mailBusy}
+              onClick={() => {
+                void fetch("/api/integrations/outlook", { method: "DELETE", credentials: "include" }).then(() => {
+                  setOutlookStatus({ connected: false });
+                  setMailNotice("Outlook disconnected.");
+                });
+              }}
+            >
+              Disconnect Outlook
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="icon-button text"
+            onClick={() => {
+              window.location.href = "/api/integrations/outlook/connect";
+            }}
+          >
+            <Link2 size={17} />
+            Connect Outlook
+          </button>
+        )}
+        {mailConnected ? (
+          <button type="button" className="icon-button text" disabled={mailBusy} onClick={() => void syncMail()}>
+            <RefreshCw size={17} className={mailBusy ? "spin" : ""} />
+            {mailBusy ? "Syncing…" : "Sync mail"}
+          </button>
+        ) : null}
+        <Pill tone="blue">{currentUser.role === "TENANT_COMPANY_ADMIN" ? "tenant approval queue" : "filtered mail sync for job contacts"}</Pill>
       </section>
+      {mailNotice ? <p className="profile-note">{mailNotice}</p> : null}
 
       <section className="mail-grid">
         {!visibleThreads.length ? (
@@ -2501,19 +2709,19 @@ function MailCenter({
             />
             <footer>
               {canDraftOutreach && (thread.status === "draft" || thread.status === "reply_drafted") ? (
-                <button className="icon-button text" onClick={() => setStatus(thread.id, "approval_requested")}>
+                <button className="icon-button text" onClick={() => void setStatus(thread.id, "approval_requested")}>
                   <ShieldCheck size={16} />
                   Request Approval
                 </button>
               ) : null}
               {roleCan(currentUser, "email:approve") && thread.status === "approval_requested" ? (
-                <button className="icon-button text" onClick={() => setStatus(thread.id, "approved", currentUser.email)}>
+                <button className="icon-button text" onClick={() => void setStatus(thread.id, "approved", currentUser.email)}>
                   <CheckCircle2 size={16} />
                   Approve
                 </button>
               ) : null}
               {currentUser.role !== "TENANT_COMPANY_ADMIN" && (thread.status === "approved" || currentUser.role === "INDIVIDUAL_CANDIDATE") ? (
-                <button className="icon-button" onClick={() => setStatus(thread.id, "sent", thread.approvedBy)} title="Send approved email">
+                <button className="icon-button" onClick={() => void setStatus(thread.id, "sent", thread.approvedBy)} title="Send via Gmail or Outlook when connected">
                   <Send size={16} />
                 </button>
               ) : null}
@@ -3049,6 +3257,16 @@ export default function ProductionPortalApp() {
   const apiTenantId = session?.user?.tenantId ?? null;
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const mailParam = new URLSearchParams(window.location.search).get("mail");
+    if (mailParam?.startsWith("gmail_")) {
+      setActiveTab("mail");
+    }
+  }, []);
+
+  useEffect(() => {
     if (status === "loading") {
       return;
     }
@@ -3233,7 +3451,16 @@ export default function ProductionPortalApp() {
             apiTenantId={apiTenantId}
           />
         ) : null}
-        {activeTab === "mail" ? <MailCenter currentUser={currentUser} users={users} setUsers={setUsers} threads={threads} setThreads={setThreads} /> : null}
+        {activeTab === "mail" ? (
+          <MailCenter
+            currentUser={currentUser}
+            sessionDbUserId={session?.user?.id ?? null}
+            users={users}
+            setUsers={setUsers}
+            threads={threads}
+            setThreads={setThreads}
+          />
+        ) : null}
         {ADMIN_OPS_TABS.includes(activeTab) ? <AdminOps view={activeTab} reviewQueue={reviewQueue} setReviewQueue={setReviewQueue} /> : null}
         {activeTab === "repository" ? <Repository /> : null}
         {activeTab === "jobs" ? (
