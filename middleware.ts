@@ -3,6 +3,17 @@ import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { errEnvelope } from "@/lib/http/api-envelope";
 
+/** NextAuth v5 uses __Secure- prefixed session cookies on HTTPS (production). */
+function sessionJwtCookieOptions() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieName = isProduction ? "__Secure-authjs.session-token" : "authjs.session-token";
+  return {
+    secureCookie: isProduction,
+    cookieName,
+    salt: cookieName
+  } as const;
+}
+
 function securityHeaders(requestId: string): Record<string, string> {
   return {
     "x-request-id": requestId,
@@ -38,7 +49,11 @@ export async function middleware(request: NextRequest) {
         headers
       });
     }
-    const token = await getToken({ req: request, secret });
+    const token = await getToken({
+      req: request,
+      secret,
+      ...sessionJwtCookieOptions()
+    });
     if (!token?.sub) {
       return NextResponse.json(errEnvelope("UNAUTHORIZED", "Authentication required.", requestId), {
         status: 401,
