@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSession, signIn, signOut, useSession } from "next-auth/react";
 import {
   Activity,
@@ -31,6 +31,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  X,
   Send,
   ShieldCheck,
   Sparkles,
@@ -108,6 +109,8 @@ import type {
   ResumeGenerationResult
 } from "@/lib/types";
 import { fetchApiEnvelope, unwrapResumeGeneration } from "@/lib/http/unwrap-api";
+import { clearMailOAuthSearchParams, parseMailOAuthSearchParams } from "@/lib/mail-oauth-notice";
+import { suggestReplyTemplates } from "@/lib/mail-reply-templates";
 import { reviewComponentDraft } from "@/lib/resume-engine";
 
 type TabId =
@@ -272,6 +275,36 @@ function Pill({
   tone?: "neutral" | "green" | "amber" | "red" | "blue";
 }) {
   return <span className={`pill ${tone}`}>{children}</span>;
+}
+
+function MailAccountPill({
+  label,
+  email,
+  disabled,
+  onDisconnect
+}: {
+  label: string;
+  email: string;
+  disabled?: boolean;
+  onDisconnect: () => void;
+}) {
+  return (
+    <span className="mail-account-pill">
+      <span className="mail-account-pill-label">{label}</span>
+      <span className="mail-account-pill-email" title={email}>
+        {email}
+      </span>
+      <button
+        type="button"
+        className="mail-account-pill-dismiss"
+        aria-label={`Disconnect ${label}`}
+        disabled={disabled}
+        onClick={onDisconnect}
+      >
+        <X size={13} strokeWidth={2.5} />
+      </button>
+    </span>
+  );
 }
 
 function SectionTitle({
@@ -2402,8 +2435,21 @@ type GmailStatus =
   | { connected: true; gmailAddress: string; lastSyncAt: string | null };
 
 type OutlookStatus =
-  | { connected: false }
-  | { connected: true; outlookAddress: string; lastSyncAt: string | null };
+  | { connected: false; configured?: boolean; redirectUri?: string | null }
+  | {
+      connected: true;
+      configured?: boolean;
+      redirectUri?: string | null;
+      outlookAddress: string;
+      lastSyncAt: string | null;
+    };
+
+/** While Mail Center stays open, background sync on this interval. */
+const MAIL_AUTO_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+
+function isMailIntegrationConnected(gmail: GmailStatus, outlook: OutlookStatus) {
+  return gmail.connected || outlook.connected;
+}
 
 function MailCenter({
   currentUser,
@@ -2411,7 +2457,9 @@ function MailCenter({
   users,
   setUsers,
   threads,
-  setThreads
+  setThreads,
+  initialOauthNotice,
+  integrationRefreshKey
 }: {
   currentUser: PortalUser;
   sessionDbUserId: string | null;
@@ -2419,29 +2467,43 @@ function MailCenter({
   setUsers: (users: PortalUser[]) => void;
   threads: MailThread[];
   setThreads: (threads: MailThread[]) => void;
+  initialOauthNotice?: string | null;
+  integrationRefreshKey?: number;
 }) {
   const [gmailStatus, setGmailStatus] = useState<GmailStatus>({ connected: false });
   const [outlookStatus, setOutlookStatus] = useState<OutlookStatus>({ connected: false });
   const [mailBusy, setMailBusy] = useState(false);
   const [mailNotice, setMailNotice] = useState<string | null>(null);
+  const [outlookStatusError, setOutlookStatusError] = useState<string | null>(null);
+  const syncMailRef = useRef<(opts?: { auto?: boolean }) => Promise<void>>(async () => undefined);
 
   const mailConnected = gmailStatus.connected || outlookStatus.connected;
 
-  const loadGmailStatus = useCallback(async () => {
+  const loadGmailStatus = useCallback(async (): Promise<GmailStatus> => {
     try {
       const status = await fetchApiEnvelope<GmailStatus>("/api/integrations/gmail/status");
       setGmailStatus(status);
+      return status;
     } catch {
-      setGmailStatus({ connected: false });
+      const fallback: GmailStatus = { connected: false };
+      setGmailStatus(fallback);
+      return fallback;
     }
   }, []);
 
-  const loadOutlookStatus = useCallback(async () => {
+  const loadOutlookStatus = useCallback(async (): Promise<OutlookStatus> => {
     try {
       const status = await fetchApiEnvelope<OutlookStatus>("/api/integrations/outlook/status");
       setOutlookStatus(status);
-    } catch {
-      setOutlookStatus({ connected: false });
+      setOutlookStatusError(null);
+      return status;
+    } catch (error) {
+      const fallback: OutlookStatus = { connected: false, configured: false };
+      setOutlookStatus(fallback);
+      setOutlookStatusError(
+        error instanceof Error ? error.message : "Could not load Outlook status."
+      );
+      return fallback;
     }
   }, []);
 
@@ -2456,11 +2518,91 @@ function MailCenter({
     }
   }, [setThreads]);
 
+  const syncMail = useCallback(
+    async (opts?: { auto?: boolean }) => {
+      const auto = opts?.auto ?? false;
+      setMailBusy(true);
+      if (!auto) {
+        setMailNotice(null);
+      }
+      try {
+        const result = await fetchApiEnvelope<{
+          imported: number;
+          contactCount: number;
+          gmailImported?: number;
+          outlookImported?: number;
+        }>("/api/mail/sync", {
+          method: "POST"
+        });
+        if (!auto) {
+          const parts = [
+            result.gmailImported ? `Gmail ${result.gmailImported}` : null,
+            result.outlookImported ? `Outlook ${result.outlookImported}` : null
+          ].filter(Boolean);
+          const detail = parts.length ? ` (${parts.join(", ")})` : "";
+          const summary = `${result.imported} messages for ${result.contactCount} contacts${detail}`;
+          setMailNotice(`Mail sync complete — ${summary}.`);
+        }
+        await loadThreadsFromApi();
+        await loadGmailStatus();
+        await loadOutlookStatus();
+      } catch (error) {
+        setMailNotice(
+          auto
+            ? `Auto-sync failed: ${error instanceof Error ? error.message : "Mail sync failed."}`
+            : error instanceof Error
+              ? error.message
+              : "Mail sync failed."
+        );
+      } finally {
+        setMailBusy(false);
+      }
+    },
+    [loadGmailStatus, loadOutlookStatus, loadThreadsFromApi]
+  );
+
+  syncMailRef.current = syncMail;
+
   useEffect(() => {
-    void loadGmailStatus();
-    void loadOutlookStatus();
-    void loadThreadsFromApi();
+    if (initialOauthNotice) {
+      setMailNotice(initialOauthNotice);
+    }
+  }, [initialOauthNotice]);
+
+  useEffect(() => {
+    void Promise.all([loadGmailStatus(), loadOutlookStatus(), loadThreadsFromApi()]);
+  }, [integrationRefreshKey, loadGmailStatus, loadOutlookStatus, loadThreadsFromApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [gmail, outlook] = await Promise.all([
+        loadGmailStatus(),
+        loadOutlookStatus(),
+        loadThreadsFromApi()
+      ]);
+      if (cancelled || !isMailIntegrationConnected(gmail, outlook)) {
+        return;
+      }
+      await syncMailRef.current({ auto: true });
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [currentUser.id, loadGmailStatus, loadOutlookStatus, loadThreadsFromApi]);
+
+  useEffect(() => {
+    if (!mailConnected) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      if (mailBusy) {
+        return;
+      }
+      void syncMailRef.current({ auto: true });
+    }, MAIL_AUTO_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [mailConnected, mailBusy]);
 
   const visibleThreads = currentUser.role === "SUPER_ADMIN"
     ? threads
@@ -2475,6 +2617,100 @@ function MailCenter({
               thread.userId === currentUser.id || (sessionDbUserId ? thread.userId === sessionDbUserId : false)
           );
   const canDraftOutreach = currentUser.role !== "TENANT_COMPANY_ADMIN" && currentUser.role !== "REVIEWER";
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [composerDraft, setComposerDraft] = useState("");
+
+  const selectedThread = useMemo(
+    () => visibleThreads.find((thread) => thread.id === selectedThreadId) ?? null,
+    [selectedThreadId, visibleThreads]
+  );
+
+  const suggestedReplies = useMemo(() => {
+    if (!selectedThread) {
+      return [];
+    }
+    const job = JOB_LISTINGS.find((item) => item.id === selectedThread.jobId);
+    return suggestReplyTemplates(selectedThread, job?.title);
+  }, [selectedThread]);
+
+  useEffect(() => {
+    if (!visibleThreads.length) {
+      setSelectedThreadId(null);
+      setComposerDraft("");
+      return;
+    }
+    if (!selectedThreadId || !visibleThreads.some((thread) => thread.id === selectedThreadId)) {
+      setSelectedThreadId(visibleThreads[0].id);
+    }
+  }, [visibleThreads, selectedThreadId]);
+
+  useEffect(() => {
+    if (selectedThread) {
+      setComposerDraft(selectedThread.draft);
+    }
+  }, [selectedThread?.id]);
+
+  async function persistDraft(threadId: string, draft: string) {
+    const updated = await fetchApiEnvelope<MailThread>("/api/mail/threads", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId, draft: draft.trim() })
+    });
+    setThreads(threads.map((thread) => (thread.id === threadId ? updated : thread)));
+    return updated;
+  }
+
+  async function applySuggestedReply(body: string) {
+    if (!selectedThread) {
+      return;
+    }
+    setComposerDraft(body);
+    setMailBusy(true);
+    try {
+      await persistDraft(selectedThread.id, body);
+      setMailNotice("Suggested reply loaded — edit or send when ready.");
+    } catch (error) {
+      setMailNotice(error instanceof Error ? error.message : "Could not save reply draft.");
+    } finally {
+      setMailBusy(false);
+    }
+  }
+
+  async function sendSuggestedReply(body: string) {
+    if (!selectedThread) {
+      return;
+    }
+    setComposerDraft(body);
+    setMailBusy(true);
+    try {
+      await persistDraft(selectedThread.id, body);
+      await setStatus(selectedThread.id, "sent", selectedThread.approvedBy);
+    } catch (error) {
+      setMailNotice(error instanceof Error ? error.message : "Could not send reply.");
+    } finally {
+      setMailBusy(false);
+    }
+  }
+
+  async function sendReplyNow() {
+    if (!selectedThread) {
+      return;
+    }
+    const draft = composerDraft.trim();
+    if (!draft) {
+      setMailNotice("Write a reply or pick a suggested reply first.");
+      return;
+    }
+    setMailBusy(true);
+    try {
+      await persistDraft(selectedThread.id, draft);
+      await setStatus(selectedThread.id, "sent", selectedThread.approvedBy);
+    } catch (error) {
+      setMailNotice(error instanceof Error ? error.message : "Could not send reply.");
+    } finally {
+      setMailBusy(false);
+    }
+  }
 
   async function createOutreach() {
     const job = JOB_LISTINGS[0];
@@ -2494,6 +2730,8 @@ function MailCenter({
         })
       });
       setThreads([created, ...threads]);
+      setSelectedThreadId(created.id);
+      setComposerDraft(created.draft);
       setMailNotice("Draft saved to the server.");
     } catch (error) {
       const thread: MailThread = {
@@ -2516,38 +2754,42 @@ function MailCenter({
     }
   }
 
-  async function syncMail() {
-    setMailBusy(true);
-    setMailNotice(null);
-    try {
-      const result = await fetchApiEnvelope<{
-        imported: number;
-        contactCount: number;
-        gmailImported?: number;
-        outlookImported?: number;
-      }>("/api/mail/sync", {
-        method: "POST"
-      });
-      const parts = [
-        result.gmailImported ? `Gmail ${result.gmailImported}` : null,
-        result.outlookImported ? `Outlook ${result.outlookImported}` : null
-      ].filter(Boolean);
-      const detail = parts.length ? ` (${parts.join(", ")})` : "";
-      setMailNotice(`Mail sync complete — ${result.imported} messages for ${result.contactCount} contacts${detail}.`);
-      await loadThreadsFromApi();
-      await loadGmailStatus();
+  function disconnectGmail() {
+    void fetch("/api/integrations/gmail", { method: "DELETE", credentials: "include" }).then(async () => {
+      setGmailStatus({ connected: false });
+      setMailNotice("Gmail disconnected.");
       await loadOutlookStatus();
-    } catch (error) {
-      setMailNotice(error instanceof Error ? error.message : "Mail sync failed.");
-    } finally {
-      setMailBusy(false);
-    }
+    });
+  }
+
+  function disconnectOutlook() {
+    void fetch("/api/integrations/outlook", { method: "DELETE", credentials: "include" }).then(async () => {
+      setOutlookStatus({ connected: false });
+      setMailNotice("Outlook disconnected.");
+      await loadGmailStatus();
+    });
   }
 
   async function setStatus(threadId: string, status: MailThread["status"], approvedBy?: string) {
+    if (status === "approval_requested" && threadId === selectedThreadId && composerDraft.trim()) {
+      setMailBusy(true);
+      try {
+        await persistDraft(threadId, composerDraft);
+      } catch (error) {
+        setMailNotice(error instanceof Error ? error.message : "Could not save draft before approval.");
+        setMailBusy(false);
+        return;
+      } finally {
+        setMailBusy(false);
+      }
+    }
+
     if (status === "sent" && mailConnected) {
       setMailBusy(true);
       try {
+        if (threadId === selectedThreadId && composerDraft.trim()) {
+          await persistDraft(threadId, composerDraft);
+        }
         const updated = await fetchApiEnvelope<MailThread>("/api/mail/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2607,128 +2849,215 @@ function MailCenter({
 
   return (
     <div className="screen-stack">
-      <section className="toolbar-line">
-        {canDraftOutreach ? (
-          <button className="icon-button text" onClick={() => void createOutreach()}>
-            <Mail size={17} />
-            Draft Outreach
-          </button>
-        ) : null}
-        {gmailStatus.connected ? (
-          <>
-            <Pill tone="green">Gmail: {gmailStatus.gmailAddress}</Pill>
+      <section className="toolbar-line mail-toolbar">
+        <div className="mail-toolbar-actions">
+          {canDraftOutreach ? (
+            <button className="icon-button text" onClick={() => void createOutreach()}>
+              <Mail size={17} />
+              Draft Outreach
+            </button>
+          ) : null}
+          {gmailStatus.connected ? (
+            <MailAccountPill
+              label="Gmail"
+              email={gmailStatus.gmailAddress}
+              disabled={mailBusy}
+              onDisconnect={disconnectGmail}
+            />
+          ) : (
             <button
               type="button"
               className="icon-button text"
-              disabled={mailBusy}
               onClick={() => {
-                void fetch("/api/integrations/gmail", { method: "DELETE", credentials: "include" }).then(() => {
-                  setGmailStatus({ connected: false });
-                  setMailNotice("Gmail disconnected.");
-                });
+                window.location.href = "/api/integrations/gmail/connect";
               }}
             >
-              Disconnect Gmail
+              <Link2 size={17} />
+              Connect Gmail
             </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="icon-button text"
-            onClick={() => {
-              window.location.href = "/api/integrations/gmail/connect";
-            }}
-          >
-            <Link2 size={17} />
-            Connect Gmail
-          </button>
-        )}
-        {outlookStatus.connected ? (
-          <>
-            <Pill tone="green">Outlook: {outlookStatus.outlookAddress}</Pill>
+          )}
+          {outlookStatus.connected ? (
+            <MailAccountPill
+              label="Outlook"
+              email={outlookStatus.outlookAddress}
+              disabled={mailBusy}
+              onDisconnect={disconnectOutlook}
+            />
+          ) : outlookStatus.configured === false ? (
+            <Pill tone="amber">Outlook OAuth not configured on server</Pill>
+          ) : (
             <button
               type="button"
               className="icon-button text"
-              disabled={mailBusy}
               onClick={() => {
-                void fetch("/api/integrations/outlook", { method: "DELETE", credentials: "include" }).then(() => {
-                  setOutlookStatus({ connected: false });
-                  setMailNotice("Outlook disconnected.");
-                });
+                window.location.href = "/api/integrations/outlook/connect";
               }}
             >
-              Disconnect Outlook
+              <Link2 size={17} />
+              Connect Outlook
             </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="icon-button text"
-            onClick={() => {
-              window.location.href = "/api/integrations/outlook/connect";
-            }}
-          >
-            <Link2 size={17} />
-            Connect Outlook
-          </button>
-        )}
-        {mailConnected ? (
-          <button type="button" className="icon-button text" disabled={mailBusy} onClick={() => void syncMail()}>
-            <RefreshCw size={17} className={mailBusy ? "spin" : ""} />
-            {mailBusy ? "Syncing…" : "Sync mail"}
-          </button>
+          )}
+        </div>
+        {currentUser.role === "TENANT_COMPANY_ADMIN" ? (
+          <Pill tone="blue">tenant approval queue</Pill>
         ) : null}
-        <Pill tone="blue">{currentUser.role === "TENANT_COMPANY_ADMIN" ? "tenant approval queue" : "filtered mail sync for job contacts"}</Pill>
       </section>
       {mailNotice ? <p className="profile-note">{mailNotice}</p> : null}
+      {outlookStatusError ? <p className="profile-note">Outlook status: {outlookStatusError}</p> : null}
 
-      <section className="mail-grid">
-        {!visibleThreads.length ? (
-          <div className="empty-state">
-            <CheckCircle2 size={26} />
-            <strong>No email approvals waiting.</strong>
-            <span>Candidate drafts appear here only after they request company-admin approval.</span>
+      {!visibleThreads.length ? (
+        <section className="empty-state">
+          <CheckCircle2 size={26} />
+          <strong>No email threads yet.</strong>
+          <span>Connect mail, sync, or draft outreach to start a conversation.</span>
+        </section>
+      ) : (
+        <section className="mail-workspace">
+          <div className="mail-thread-list">
+            {visibleThreads.map((thread) => (
+              <button
+                type="button"
+                key={thread.id}
+                className={`mail-thread-list-item${selectedThreadId === thread.id ? " active" : ""}`}
+                onClick={() => setSelectedThreadId(thread.id)}
+              >
+                <div className="mail-thread-list-item-top">
+                  <strong>{thread.contactName}</strong>
+                  <Pill tone={thread.status === "sent" ? "green" : thread.status === "approval_requested" ? "amber" : "blue"}>
+                    {thread.status}
+                  </Pill>
+                </div>
+                <span className="mail-thread-list-subject">{thread.subject}</span>
+                <span className="mail-thread-list-preview">{thread.lastMessage}</span>
+              </button>
+            ))}
           </div>
-        ) : null}
-        {visibleThreads.map((thread) => (
-          <article className="mail-card" key={thread.id}>
-            <header>
-              <div>
-                <strong>{thread.subject}</strong>
-                <span>{thread.contactName} | {thread.contactEmail}</span>
+
+          <article className="mail-thread-detail">
+            {selectedThread ? (
+              <>
+                <header className="mail-thread-detail-header">
+                  <div>
+                    <strong>{selectedThread.subject}</strong>
+                    <span>
+                      {selectedThread.contactName} · {selectedThread.contactEmail}
+                      {selectedThread.company ? ` · ${selectedThread.company}` : ""}
+                    </span>
+                  </div>
+                  <Pill tone={selectedThread.status === "sent" ? "green" : selectedThread.status === "approval_requested" ? "amber" : "blue"}>
+                    {selectedThread.status}
+                  </Pill>
+                </header>
+
+                <div className="mail-message-inbound">
+                  <span className="mail-message-label">Latest message</span>
+                  <p>{selectedThread.lastMessage}</p>
+                </div>
+
+                {canDraftOutreach && suggestedReplies.length ? (
+                  <div className="mail-reply-suggestions">
+                    <span className="mail-reply-suggestions-label">Suggested replies</span>
+                    <div className="mail-reply-chips">
+                      {suggestedReplies.map((template) => (
+                        <button
+                          type="button"
+                          key={template.id}
+                          className="mail-reply-chip"
+                          disabled={mailBusy}
+                          onClick={() => void applySuggestedReply(template.bodyFilled)}
+                          title={template.bodyFilled}
+                        >
+                          {template.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mail-reply-quick-actions">
+                      {suggestedReplies.slice(0, 2).map((template) => (
+                        <button
+                          type="button"
+                          key={`${template.id}-send`}
+                          className="icon-button text mail-reply-send-chip"
+                          disabled={mailBusy || !mailConnected}
+                          onClick={() => void sendSuggestedReply(template.bodyFilled)}
+                        >
+                          <Send size={14} />
+                          Send: {template.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <label className="mail-composer-label">
+                  Your reply
+                  <textarea
+                    value={composerDraft}
+                    readOnly={currentUser.role === "TENANT_COMPANY_ADMIN"}
+                    placeholder="Pick a suggested reply or type your own message…"
+                    onChange={(event) => setComposerDraft(event.target.value)}
+                    onBlur={() => {
+                      if (!selectedThread || currentUser.role === "TENANT_COMPANY_ADMIN" || !composerDraft.trim()) {
+                        return;
+                      }
+                      if (composerDraft.trim() !== selectedThread.draft.trim()) {
+                        void persistDraft(selectedThread.id, composerDraft).catch(() => undefined);
+                      }
+                    }}
+                  />
+                </label>
+
+                <footer className="mail-thread-detail-footer">
+                  {canDraftOutreach && (selectedThread.status === "draft" || selectedThread.status === "reply_drafted" || selectedThread.status === "incoming") ? (
+                    <button
+                      type="button"
+                      className="icon-button text"
+                      disabled={mailBusy}
+                      onClick={() => void setStatus(selectedThread.id, "approval_requested")}
+                    >
+                      <ShieldCheck size={16} />
+                      Request Approval
+                    </button>
+                  ) : null}
+                  {roleCan(currentUser, "email:approve") && selectedThread.status === "approval_requested" ? (
+                    <button
+                      type="button"
+                      className="icon-button text"
+                      disabled={mailBusy}
+                      onClick={() => void setStatus(selectedThread.id, "approved", currentUser.email)}
+                    >
+                      <CheckCircle2 size={16} />
+                      Approve
+                    </button>
+                  ) : null}
+                  {currentUser.role !== "TENANT_COMPANY_ADMIN" &&
+                  (selectedThread.status === "approved" ||
+                    selectedThread.status === "draft" ||
+                    selectedThread.status === "reply_drafted" ||
+                    selectedThread.status === "incoming" ||
+                    currentUser.role === "INDIVIDUAL_CANDIDATE") ? (
+                    <button
+                      type="button"
+                      className="icon-button text"
+                      disabled={mailBusy || !composerDraft.trim()}
+                      onClick={() => void sendReplyNow()}
+                      title={mailConnected ? "Send via Gmail or Outlook" : "Connect mail to send"}
+                    >
+                      <Send size={16} />
+                      Send reply
+                    </button>
+                  ) : null}
+                </footer>
+              </>
+            ) : (
+              <div className="empty-state compact">
+                <Mail size={24} />
+                <strong>Select a thread</strong>
+                <span>Choose a conversation on the left to view messages and reply.</span>
               </div>
-              <Pill tone={thread.status === "sent" ? "green" : thread.status === "approval_requested" ? "amber" : "blue"}>
-                {thread.status}
-              </Pill>
-            </header>
-            <p>{thread.lastMessage}</p>
-            <textarea
-              value={thread.draft}
-              readOnly={currentUser.role === "TENANT_COMPANY_ADMIN"}
-              onChange={(event) => setThreads(threads.map((item) => item.id === thread.id ? { ...item, draft: event.target.value } : item))}
-            />
-            <footer>
-              {canDraftOutreach && (thread.status === "draft" || thread.status === "reply_drafted") ? (
-                <button className="icon-button text" onClick={() => void setStatus(thread.id, "approval_requested")}>
-                  <ShieldCheck size={16} />
-                  Request Approval
-                </button>
-              ) : null}
-              {roleCan(currentUser, "email:approve") && thread.status === "approval_requested" ? (
-                <button className="icon-button text" onClick={() => void setStatus(thread.id, "approved", currentUser.email)}>
-                  <CheckCircle2 size={16} />
-                  Approve
-                </button>
-              ) : null}
-              {currentUser.role !== "TENANT_COMPANY_ADMIN" && (thread.status === "approved" || currentUser.role === "INDIVIDUAL_CANDIDATE") ? (
-                <button className="icon-button" onClick={() => void setStatus(thread.id, "sent", thread.approvedBy)} title="Send via Gmail or Outlook when connected">
-                  <Send size={16} />
-                </button>
-              ) : null}
-            </footer>
+            )}
           </article>
-        ))}
-      </section>
+        </section>
+      )}
     </div>
   );
 }
@@ -3253,6 +3582,8 @@ export default function ProductionPortalApp() {
   const [sessionUserId, setSessionUserId] = usePersistentState<string | null>("lp-session-user", null);
   const [activeTab, setActiveTab] = useState<TabId>("command");
   const [result, setResult] = useState<ResumeGenerationResult | null>(null);
+  const [mailOauthNotice, setMailOauthNotice] = useState<string | null>(null);
+  const [mailIntegrationRefreshKey, setMailIntegrationRefreshKey] = useState(0);
 
   const apiTenantId = session?.user?.tenantId ?? null;
 
@@ -3260,9 +3591,18 @@ export default function ProductionPortalApp() {
     if (typeof window === "undefined") {
       return;
     }
-    const mailParam = new URLSearchParams(window.location.search).get("mail");
-    if (mailParam?.startsWith("gmail_")) {
+    const parsed = parseMailOAuthSearchParams(window.location.search);
+    if (parsed.openMailTab) {
       setActiveTab("mail");
+    }
+    if (parsed.notice) {
+      setMailOauthNotice(parsed.notice);
+    }
+    if (parsed.shouldRefreshIntegrations) {
+      setMailIntegrationRefreshKey((key) => key + 1);
+    }
+    if (parsed.openMailTab || parsed.notice) {
+      clearMailOAuthSearchParams();
     }
   }, []);
 
@@ -3459,6 +3799,8 @@ export default function ProductionPortalApp() {
             setUsers={setUsers}
             threads={threads}
             setThreads={setThreads}
+            initialOauthNotice={mailOauthNotice}
+            integrationRefreshKey={mailIntegrationRefreshKey}
           />
         ) : null}
         {ADMIN_OPS_TABS.includes(activeTab) ? <AdminOps view={activeTab} reviewQueue={reviewQueue} setReviewQueue={setReviewQueue} /> : null}

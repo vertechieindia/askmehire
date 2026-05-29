@@ -123,6 +123,21 @@ export const mailThreadStatusUpdateSchema = z.object({
   status: mailThreadStatusSchema
 });
 
+export const mailThreadDraftUpdateSchema = z.object({
+  threadId: z.string().uuid(),
+  draft: z.string().min(1).max(12000)
+});
+
+export const mailThreadPatchSchema = z
+  .object({
+    threadId: z.string().uuid(),
+    status: mailThreadStatusSchema.optional(),
+    draft: z.string().min(1).max(12000).optional()
+  })
+  .refine((data) => data.status !== undefined || data.draft !== undefined, {
+    message: "Provide status and/or draft to update."
+  });
+
 export const mailSendSchema = z.object({
   threadId: z.string().uuid()
 });

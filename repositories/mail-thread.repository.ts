@@ -73,6 +73,16 @@ export class MailThreadRepository {
     });
   }
 
+  async updateDraft(id: string, draft: string, opts?: { status?: string }) {
+    return prisma.mailThread.update({
+      where: { id },
+      data: {
+        draft,
+        ...(opts?.status ? { status: opts.status } : {})
+      }
+    });
+  }
+
   async upsertIncomingFromProvider(params: {
     provider: "gmail" | "outlook";
     tenantId: string | null;

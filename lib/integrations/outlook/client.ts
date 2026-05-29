@@ -55,6 +55,36 @@ async function fetchTokens(body: Record<string, string>): Promise<TokenResponse>
   return res.json() as Promise<TokenResponse>;
 }
 
+async function readOutlookAddress(accessToken: string): Promise<string> {
+  try {
+    const profile = await graphGet<{
+      mail?: string | null;
+      userPrincipalName?: string | null;
+      otherMails?: string[] | null;
+    }>("/me", accessToken, {
+      $select: "mail,userPrincipalName,otherMails"
+    });
+    const address =
+      profile.mail?.trim() ||
+      profile.userPrincipalName?.trim() ||
+      profile.otherMails?.find((value) => value?.includes("@"))?.trim();
+    if (address) {
+      return address;
+    }
+  } catch {
+    // Fall back to an unfiltered /me read when $select is rejected.
+  }
+  const fallback = await graphGet<{
+    mail?: string | null;
+    userPrincipalName?: string | null;
+  }>("/me", accessToken);
+  const address = fallback.mail?.trim() || fallback.userPrincipalName?.trim();
+  if (!address) {
+    throw new Error("Could not read Outlook address from Microsoft profile.");
+  }
+  return address;
+}
+
 export async function exchangeOutlookCode(code: string) {
   const tokens = await fetchTokens({
     grant_type: "authorization_code",
@@ -64,13 +94,7 @@ export async function exchangeOutlookCode(code: string) {
   if (!tokens.refresh_token) {
     throw new Error("Microsoft did not return a refresh token. Revoke app access and connect again.");
   }
-  const profile = await graphGet<{ mail?: string; userPrincipalName?: string }>("/me", tokens.access_token, {
-    $select: "mail,userPrincipalName"
-  });
-  const outlookAddress = profile.mail || profile.userPrincipalName;
-  if (!outlookAddress) {
-    throw new Error("Could not read Outlook address from Microsoft profile.");
-  }
+  const outlookAddress = await readOutlookAddress(tokens.access_token);
   return {
     outlookAddress,
     refreshToken: tokens.refresh_token

@@ -13,6 +13,8 @@ export async function GET(request: Request) {
     return NextResponse.redirect(url);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Outlook connect failed.";
-    return NextResponse.redirect(new URL(`/?mail=outlook_error&message=${encodeURIComponent(message)}`, request.url));
+    return NextResponse.redirect(
+      new URL(`/?tab=mail&mail=outlook_error&message=${encodeURIComponent(message)}`, request.url)
+    );
   }
 }
