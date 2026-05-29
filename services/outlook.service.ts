@@ -49,12 +49,20 @@ export class OutlookService {
   }
 
   async getStatus(userId: string) {
+    const config = getOutlookOAuthConfig();
+    const configured = Boolean(config);
     const row = await this.connections.findByUserId(userId);
     if (!row) {
-      return { connected: false as const };
+      return {
+        connected: false as const,
+        configured,
+        redirectUri: config?.redirectUri ?? null
+      };
     }
     return {
       connected: true as const,
+      configured,
+      redirectUri: config?.redirectUri ?? null,
       outlookAddress: row.outlookAddress,
       lastSyncAt: row.lastSyncAt?.toISOString() ?? null
     };

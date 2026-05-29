@@ -138,6 +138,42 @@ export class GmailService {
     return mapped;
   }
 
+  async updateThreadDraft(ctx: ApiContext, threadId: string, draft: string) {
+    const row = await this.mailThreads.findById(threadId);
+    if (!row) {
+      throw new AppError("NOT_FOUND", "Mail thread not found.", 404);
+    }
+    if (row.userId !== ctx.userId && !roleHasPermission(ctx.role, "email:approve") && !roleHasPermission(ctx.role, "tenant:manage_users")) {
+      throw new AppError("FORBIDDEN", "You cannot update this mail thread.", 403);
+    }
+    const nextStatus =
+      row.status === "incoming" && draft.trim().length > 0 ? ("reply_drafted" as const) : undefined;
+    const updated = await this.mailThreads.updateDraft(threadId, draft.trim(), {
+      ...(nextStatus ? { status: nextStatus } : {})
+    });
+    const [mapped] = await this.mailThreads.mapRowsToPortal([updated]);
+    return mapped;
+  }
+
+  async patchThread(
+    ctx: ApiContext,
+    threadId: string,
+    patch: { status?: MailThread["status"]; draft?: string }
+  ) {
+    if (patch.draft !== undefined) {
+      await this.updateThreadDraft(ctx, threadId, patch.draft);
+    }
+    if (patch.status !== undefined) {
+      return this.updateThreadStatus(ctx, threadId, patch.status);
+    }
+    const row = await this.mailThreads.findById(threadId);
+    if (!row) {
+      throw new AppError("NOT_FOUND", "Mail thread not found.", 404);
+    }
+    const [mapped] = await this.mailThreads.mapRowsToPortal([row]);
+    return mapped;
+  }
+
   async syncInbox(ctx: ApiContext) {
     const connection = await this.connections.findByUserId(ctx.userId);
     if (!connection) {

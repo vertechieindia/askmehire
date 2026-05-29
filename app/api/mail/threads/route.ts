@@ -1,6 +1,6 @@
 import { handleJsonApi, parseJsonBody } from "@/lib/http/with-api-handler";
 import { requirePermission } from "@/lib/auth/rbac";
-import { mailThreadCreateSchema, mailThreadStatusUpdateSchema } from "@/validators/api-schemas";
+import { mailThreadCreateSchema, mailThreadPatchSchema } from "@/validators/api-schemas";
 import { GmailService } from "@/services/gmail.service";
 
 const gmailService = new GmailService();
@@ -32,14 +32,20 @@ export async function PATCH(request: Request) {
   return handleJsonApi(
     request,
     async (req, ctx) => {
-      const body = await parseJsonBody(req, mailThreadStatusUpdateSchema);
+      const body = await parseJsonBody(req, mailThreadPatchSchema);
+      if (body.draft !== undefined) {
+        requirePermission(ctx.role, "email:draft");
+      }
       if (body.status === "approval_requested") {
         requirePermission(ctx.role, "email:draft");
       }
       if (body.status === "approved") {
         requirePermission(ctx.role, "email:approve");
       }
-      return gmailService.updateThreadStatus(ctx, body.threadId, body.status);
+      return gmailService.patchThread(ctx, body.threadId, {
+        status: body.status,
+        draft: body.draft
+      });
     },
     { rateLimitKey: "api:mail:threads:patch" }
   );

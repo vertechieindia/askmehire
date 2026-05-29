@@ -1,4 +1,7 @@
 export const OUTLOOK_SCOPES = [
+  "openid",
+  "profile",
+  "email",
   "offline_access",
   "https://graph.microsoft.com/Mail.Read",
   "https://graph.microsoft.com/Mail.Send",
