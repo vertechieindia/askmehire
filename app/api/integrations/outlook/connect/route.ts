@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { appRedirectUrl } from "@/lib/http/app-origin";
 import { prepareApiContext } from "@/lib/http/with-api-handler";
 import { requirePermission } from "@/lib/auth/rbac";
 import { OutlookService } from "@/services/outlook.service";
@@ -14,7 +15,7 @@ export async function GET(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Outlook connect failed.";
     return NextResponse.redirect(
-      new URL(`/?tab=mail&mail=outlook_error&message=${encodeURIComponent(message)}`, request.url)
+      appRedirectUrl(`/?tab=mail&mail=outlook_error&message=${encodeURIComponent(message)}`, request)
     );
   }
 }
