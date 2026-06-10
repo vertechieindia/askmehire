@@ -831,8 +831,204 @@ select:focus {
 
 .job-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 14px;
+}
+
+.jobs-toolbar {
+  align-items: stretch;
+  gap: 12px;
+}
+
+.jobs-toolbar .search-box {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.jobs-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.connector-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.connector-card-compact {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  min-height: 0 !important;
+  gap: 8px;
+}
+
+.connector-card-compact header {
+  margin: 0;
+}
+
+.connector-card-compact .row-actions {
+  justify-self: end;
+}
+
+.connector-card-compact.is-busy {
+  border-color: var(--blue-soft);
+  background: #f3f8fb;
+}
+
+.connector-card-compact.is-busy .pill {
+  color: var(--teal);
+}
+
+.job-card-compact {
+  min-height: 0;
+  gap: 10px;
+}
+
+.job-card-compact h3 {
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.job-card-compact footer {
+  margin-top: auto;
+}
+
+.primary-button,
+a.primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--teal);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.primary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.job-card-actions,
+.job-detail-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.primary-button.compact,
+.secondary-button.compact {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.job-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.job-detail-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(16, 24, 32, 0.45);
+}
+
+.job-detail-panel {
+  position: relative;
+  z-index: 1;
+  width: min(760px, 100%);
+  max-height: min(88vh, 900px);
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+}
+
+.job-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.job-detail-header h2 {
+  margin: 8px 0 4px;
+  font-size: 24px;
+}
+
+.job-detail-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.job-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.job-detail-description {
+  white-space: pre-wrap;
+  line-height: 1.55;
+  color: var(--ink);
+  font-size: 14px;
+  max-height: 42vh;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcf8;
+}
+
+.jobs-load-more {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--teal);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.jobs-load-more:hover {
+  background: #f3f8fb;
+  border-color: var(--blue-soft);
 }
 
 .job-card {
@@ -1668,6 +1864,7 @@ select:focus {
   .mail-grid,
   .mail-workspace,
   .connector-grid,
+  .connector-grid.compact,
   .ops-workspace-grid,
   .template-metrics,
   .candidate-profile-grid,
@@ -1718,6 +1915,19 @@ select:focus {
     font-size: 25px;
   }
 
+  .jobs-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .jobs-toolbar-actions {
+    width: 100%;
+  }
+
+  .jobs-toolbar-actions .icon-button.text {
+    flex: 1;
+  }
+
   .metric-grid,
   .job-grid,
   .form-grid.compact,
@@ -1738,6 +1948,7 @@ select:focus {
 
   .access-form,
   .connector-grid,
+  .connector-grid.compact,
   .ops-workspace-grid,
   .template-metrics,
   .candidate-profile-grid,

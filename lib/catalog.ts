@@ -782,6 +782,33 @@ export const JOB_LISTINGS: JobListing[] = [
   }
 ];
 
+export const INTERNAL_JOB_LISTINGS: JobListing[] = [
+  {
+    id: "internal-001",
+    source: "Internal",
+    title: "React Developer",
+    company: "Northstar Recruiting",
+    location: "Remote",
+    domain: "Technology",
+    skills: ["React", "TypeScript", "Next.js", "Tailwind"],
+    normalizedScore: 95,
+    postedAt: "2026-06-01",
+    applyMode: "manual"
+  },
+  {
+    id: "internal-002",
+    source: "Internal",
+    title: "Senior React Engineer",
+    company: "Askmehire Partner Co",
+    location: "Charlotte, NC",
+    domain: "Technology",
+    skills: ["React", "Redux", "Jest", "C2C"],
+    normalizedScore: 93,
+    postedAt: "2026-06-02",
+    applyMode: "manual"
+  }
+];
+
 export const APPLICATIONS: ApplicationRecord[] = [
   {
     id: "app-001",

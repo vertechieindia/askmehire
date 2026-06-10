@@ -54,12 +54,9 @@ import {
 } from "@/lib/catalog";
 import {
   DEFAULT_CANDIDATE_PROFILES,
-  JOB_PORTAL_CONNECTORS,
-  buildDefaultProfileForUser,
-  createAppliedRoleRecord,
-  syncJobsForCandidate
+  buildDefaultProfileForUser
 } from "@/lib/job-integrations";
-import { matchSyncedRoleToCatalogJobId, pickSeededResumeLegacyId } from "@/lib/job-catalog-match";
+import { pickSeededResumeLegacyId } from "@/lib/job-catalog-match";
 import {
   buildFormattedResumePlainText,
   buildResumeSourceText,
@@ -75,9 +72,12 @@ import type {
 import type {
   AppliedRoleRecord,
   CandidateApplicationProfile,
-  ConnectorStatus,
   SyncedRole
 } from "@/lib/job-integrations";
+import { extractJobApplyUrl, jobDescriptionWithoutApplyLine } from "@/lib/jobs/job-details";
+import type { JobConnectorStatusRow } from "@/lib/integrations/jobs/types";
+import { EXTERNAL_CONNECTOR_PLATFORMS, INDEXED_JOB_SOURCES } from "@/lib/integrations/jobs/types";
+import { getSyncConnectorMeta } from "@/lib/integrations/jobs/connector-meta";
 import {
   ADMIN_REVIEW_QUEUE,
   BILLING_LEDGER,
@@ -105,6 +105,7 @@ import type {
 import type {
   ApplicationRecord,
   JobsApiData,
+  JobListing,
   ResumeGenerationRequest,
   ResumeGenerationResult
 } from "@/lib/types";
@@ -1919,8 +1920,6 @@ function JobsAndApplications({
   setUsers,
   candidateProfiles,
   setCandidateProfiles,
-  syncedRoles,
-  setSyncedRoles,
   appliedRoles,
   setAppliedRoles,
   result,
@@ -1931,39 +1930,74 @@ function JobsAndApplications({
   setUsers: (users: PortalUser[]) => void;
   candidateProfiles: CandidateApplicationProfile[];
   setCandidateProfiles: (profiles: CandidateApplicationProfile[]) => void;
-  syncedRoles: SyncedRole[];
-  setSyncedRoles: (roles: SyncedRole[]) => void;
   appliedRoles: AppliedRoleRecord[];
   setAppliedRoles: (records: AppliedRoleRecord[]) => void;
   result: ResumeGenerationResult | null;
   apiTenantId: string | null;
 }) {
   const profile = candidateProfiles.find((item) => item.userId === currentUser.id) || buildDefaultProfileForUser(currentUser);
-  const [syncCycle, setSyncCycle] = useState(0);
-  const [lastSync, setLastSync] = useState<string>("Not synced yet");
-  const visibleRoles = syncedRoles.filter((role) => role.id.startsWith(`${profile.userId}-`));
-  const [dbJobs, setDbJobs] = useState<JobsApiData["jobs"]>([]);
-  const [dbApplications, setDbApplications] = useState<ApplicationRecord[]>([]);
+  const [jobsBySource, setJobsBySource] = useState<JobsApiData["bySource"]>({});
   const [serverIndexError, setServerIndexError] = useState<string | null>(null);
   const [serverIndexLoading, setServerIndexLoading] = useState(false);
   const [prepareApiError, setPrepareApiError] = useState<string | null>(null);
+  const [saveJobNotice, setSaveJobNotice] = useState<string | null>(null);
+  const [selectedJobDetail, setSelectedJobDetail] = useState<JobListing | null>(null);
   const [jobSearchInput, setJobSearchInput] = useState("");
-  const [jobDomainInput, setJobDomainInput] = useState("");
+  const [connectorStatuses, setConnectorStatuses] = useState<JobConnectorStatusRow[]>([]);
+  const [connectorActionError, setConnectorActionError] = useState<string | null>(null);
+  const [connectorActionNotice, setConnectorActionNotice] = useState<string | null>(null);
+  const [connectorBusy, setConnectorBusy] = useState<{
+    portal: string | "all";
+    action: "connect" | "disconnect" | "sync";
+  } | null>(null);
+  const [internalJobDraft, setInternalJobDraft] = useState({
+    title: "",
+    company: "",
+    location: "Remote",
+    domain: "Technology",
+    skills: "React, TypeScript",
+    description: ""
+  });
+  const [internalJobNotice, setInternalJobNotice] = useState<string | null>(null);
+  const canPostInternalJobs = roleCan(currentUser, "jobs:create_internal");
+  const jobsPreviewPerSource = 8;
+  const [expandedJobSources, setExpandedJobSources] = useState<Record<string, boolean>>({});
+  const orderedJobSources = useMemo(() => {
+    const known = INDEXED_JOB_SOURCES.filter((source) => jobsBySource[source]);
+    const extra = Object.keys(jobsBySource).filter((source) => !INDEXED_JOB_SOURCES.includes(source as (typeof INDEXED_JOB_SOURCES)[number]));
+    return [...known, ...extra];
+  }, [jobsBySource]);
 
-  async function loadServerJobIndex(q: string, domain: string) {
+  async function loadConnectorStatuses(autoSyncPending = true) {
+    try {
+      const rows = await fetchApiEnvelope<JobConnectorStatusRow[]>("/api/integrations/jobs/connectors", {
+        headers: { ...apiTenantHeaders(apiTenantId) }
+      });
+      setConnectorStatuses(rows);
+      if (autoSyncPending) {
+        const pending = rows
+          .filter((row) => row.status === "connected" && !row.lastSyncedAt)
+          .map((row) => row.portalName);
+        if (pending.length > 0) {
+          await syncConnectedPortals(pending);
+        }
+      }
+    } catch (err) {
+      setConnectorActionError(err instanceof Error ? err.message : "Unable to load connector statuses.");
+    }
+  }
+
+  async function loadServerJobIndex(q: string) {
     setServerIndexError(null);
     setPrepareApiError(null);
     setServerIndexLoading(true);
+    setExpandedJobSources({});
     try {
-      const params = new URLSearchParams({ q, domain });
+      const params = new URLSearchParams({ q });
       const jobsData = await fetchApiEnvelope<JobsApiData>(`/api/jobs?${params}`, {
         headers: { ...apiTenantHeaders(apiTenantId) }
       });
-      setDbJobs(jobsData.jobs);
-      const apps = await fetchApiEnvelope<ApplicationRecord[]>("/api/applications", {
-        headers: { ...apiTenantHeaders(apiTenantId) }
-      });
-      setDbApplications(apps);
+      setJobsBySource(jobsData.bySource);
     } catch (err) {
       setServerIndexError(err instanceof Error ? err.message : "Unable to load jobs or applications from the API.");
     } finally {
@@ -1976,22 +2010,130 @@ function JobsAndApplications({
     setCandidateProfiles(exists ? candidateProfiles.map((item) => item.userId === profileUpdate.userId ? profileUpdate : item) : [profileUpdate, ...candidateProfiles]);
   }
 
-  function syncConnectorDemo() {
-    const nextRoles = syncJobsForCandidate(profile, syncedRoles, syncCycle);
-    setSyncedRoles(nextRoles);
-    setSyncCycle(syncCycle + 1);
-    setLastSync(new Date().toLocaleTimeString());
+  async function syncConnectedPortals(
+    portals?: string[],
+    options?: { preserveBusy?: { portal: string; action: "connect" | "disconnect" | "sync" } }
+  ) {
+    setConnectorActionError(null);
+    setConnectorActionNotice(null);
+    if (!options?.preserveBusy) {
+      setConnectorBusy({ portal: "all", action: "sync" });
+    } else {
+      setConnectorBusy({ portal: options.preserveBusy.portal, action: "sync" });
+    }
+    try {
+      const data = await fetchApiEnvelope<{
+        results: Array<{ portal: string; imported: number }>;
+        errors?: Array<{ portal: string; message: string }>;
+      }>("/api/integrations/jobs/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...apiTenantHeaders(apiTenantId) },
+        body: JSON.stringify({
+          query: jobSearchInput.trim(),
+          ...(portals?.length ? { portals } : {})
+        })
+      });
+      const importedTotal = data.results.reduce((sum, item) => sum + item.imported, 0);
+      if (data.results.length > 0) {
+        setConnectorActionNotice(
+          `Synced ${importedTotal} job(s): ${data.results.map((r) => `${r.portal} (${r.imported})`).join(", ")}.`
+        );
+      }
+      if (data.errors?.length) {
+        setConnectorActionError(
+          data.results.length > 0
+            ? `Partial sync: ${data.results.map((r) => `${r.portal} (${r.imported})`).join(", ")}. Errors: ${data.errors.map((e) => `${e.portal}: ${e.message}`).join(" | ")}`
+            : data.errors.map((e) => `${e.portal}: ${e.message}`).join(" | ")
+        );
+      }
+      setJobSearchInput("");
+      await loadServerJobIndex("");
+      await loadConnectorStatuses(false);
+    } catch (err) {
+      setConnectorActionError(err instanceof Error ? err.message : "Connector sync failed.");
+    } finally {
+      if (!options?.preserveBusy) {
+        setConnectorBusy(null);
+      }
+    }
   }
 
-  function refreshJobs() {
-    syncConnectorDemo();
-    void loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim());
+  async function connectPortal(portal: string) {
+    setConnectorActionError(null);
+    setConnectorActionNotice(null);
+    setConnectorBusy({ portal, action: "connect" });
+    try {
+      const rows = await fetchApiEnvelope<JobConnectorStatusRow[]>(
+        `/api/integrations/jobs/connectors/${encodeURIComponent(portal)}/connect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...apiTenantHeaders(apiTenantId) },
+          body: JSON.stringify({})
+        }
+      );
+      setConnectorStatuses(rows);
+      if (portal === "Jooble") {
+        setConnectorActionNotice(
+          "Jooble connected using JOOBLE_API_KEY from .env. Click Sync to import jobs (may require Jooble to enable server access or production deploy)."
+        );
+      } else {
+        await syncConnectedPortals([portal], { preserveBusy: { portal, action: "connect" } });
+      }
+    } catch (err) {
+      setConnectorActionError(err instanceof Error ? err.message : `Unable to connect ${portal}.`);
+    } finally {
+      setConnectorBusy(null);
+    }
+  }
+
+  async function disconnectPortal(portal: string) {
+    setConnectorActionError(null);
+    setConnectorBusy({ portal, action: "disconnect" });
+    try {
+      const rows = await fetchApiEnvelope<JobConnectorStatusRow[]>(
+        `/api/integrations/jobs/connectors/${encodeURIComponent(portal)}/disconnect`,
+        {
+          method: "POST",
+          headers: { ...apiTenantHeaders(apiTenantId) }
+        }
+      );
+      setConnectorStatuses(rows);
+      await loadServerJobIndex(jobSearchInput.trim());
+    } catch (err) {
+      setConnectorActionError(err instanceof Error ? err.message : `Unable to disconnect ${portal}.`);
+    } finally {
+      setConnectorBusy(null);
+    }
+  }
+
+  async function postInternalJob() {
+    setInternalJobNotice(null);
+    setServerIndexError(null);
+    try {
+      await fetchApiEnvelope<JobListing>("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...apiTenantHeaders(apiTenantId) },
+        body: JSON.stringify({
+          title: internalJobDraft.title,
+          company: internalJobDraft.company,
+          location: internalJobDraft.location,
+          domain: internalJobDraft.domain,
+          skills: internalJobDraft.skills.split(",").map((item) => item.trim()).filter(Boolean),
+          description: internalJobDraft.description
+        })
+      });
+      setInternalJobNotice("Internal job posted to your tenant index.");
+      setInternalJobDraft({ title: "", company: "", location: "Remote", domain: "Technology", skills: "React, TypeScript", description: "" });
+      await loadServerJobIndex(jobSearchInput.trim());
+    } catch (err) {
+      setServerIndexError(err instanceof Error ? err.message : "Unable to post internal job.");
+    }
   }
 
   useEffect(() => {
     setJobSearchInput("");
-    setJobDomainInput("");
-    void loadServerJobIndex("", "");
+    void loadServerJobIndex("");
+    void loadConnectorStatuses();
   }, [apiTenantId]);
 
   useEffect(() => {
@@ -2000,61 +2142,9 @@ function JobsAndApplications({
     }
   }, [candidateProfiles, currentUser.id, profile, setCandidateProfiles]);
 
-  useEffect(() => {
-    syncConnectorDemo();
-    const interval = window.setInterval(() => {
-      const storedProfiles = JSON.parse(window.localStorage.getItem("lp-candidate-profiles") || "[]") as CandidateApplicationProfile[];
-      const latestProfile = storedProfiles.find((item) => item.userId === currentUser.id) || profile;
-      const storedRoles = JSON.parse(window.localStorage.getItem("lp-synced-roles") || "[]") as SyncedRole[];
-      const nextRoles = syncJobsForCandidate(latestProfile, storedRoles, Date.now());
-      setSyncedRoles(nextRoles);
-      setLastSync(new Date().toLocaleTimeString());
-    }, 60000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  function toggleConnector(name: string, status: ConnectorStatus) {
-    saveProfile({
-      ...profile,
-      connectorStatuses: {
-        ...profile.connectorStatuses,
-        [name]: status
-      },
-      updatedAt: today()
-    });
-  }
-
-  async function prepareApplication(role: SyncedRole) {
+  async function prepareDbApplication(job: JobListing) {
     setPrepareApiError(null);
-    const record = createAppliedRoleRecord({
-      userId: currentUser.id,
-      role,
-      profile,
-      resume: result
-    });
-    setAppliedRoles([record, ...appliedRoles]);
-    setSyncedRoles(syncedRoles.map((item) => (item.id === role.id ? { ...item, status: "prepared" } : item)));
-    setUsers(
-      users.map((user) =>
-        user.id === currentUser.id
-          ? {
-              ...user,
-              usage: {
-                ...user.usage,
-                jobApplications: user.usage.jobApplications + 1
-              }
-            }
-          : user
-      )
-    );
-
-    const catalogJobId = matchSyncedRoleToCatalogJobId(role);
-    if (!catalogJobId) {
-      setPrepareApiError(
-        "This demo role does not match a seeded catalog job — prepared locally only. Add a matching row in JOB_LISTINGS to persist to Postgres."
-      );
-      return;
-    }
+    setSaveJobNotice(null);
     const resumeLegacy = pickSeededResumeLegacyId(profile.primaryResumeId);
     try {
       await fetchApiEnvelope<ApplicationRecord>("/api/applications", {
@@ -2064,156 +2154,126 @@ function JobsAndApplications({
           ...apiTenantHeaders(apiTenantId)
         },
         body: JSON.stringify({
-          jobId: catalogJobId,
+          jobId: job.id,
           resumeId: resumeLegacy,
           status: "Saved"
         })
       });
-      await loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim());
+      setUsers(
+        users.map((user) =>
+          user.id === currentUser.id
+            ? {
+                ...user,
+                usage: {
+                  ...user.usage,
+                  jobApplications: user.usage.jobApplications + 1
+                }
+              }
+            : user
+        )
+      );
+      setSaveJobNotice(`Saved "${job.title}" to your applications.`);
+      await loadServerJobIndex(jobSearchInput.trim());
     } catch (err) {
       setPrepareApiError(err instanceof Error ? err.message : "Could not save application to the database.");
     }
   }
 
+  function openJobDetails(job: JobListing) {
+    setSelectedJobDetail(job);
+  }
+
+  function closeJobDetails() {
+    setSelectedJobDetail(null);
+  }
+
   return (
     <div className="screen-stack">
-      <section className="toolbar-line">
+      {prepareApiError ? <div className="error-banner">{prepareApiError}</div> : null}
+      {saveJobNotice ? <div className="profile-note">{saveJobNotice}</div> : null}
+      {connectorActionError ? <div className="error-banner">{connectorActionError}</div> : null}
+      {connectorActionNotice ? <div className="profile-note">{connectorActionNotice}</div> : null}
+
+      <section className="toolbar-line jobs-toolbar">
         <div className="search-box">
           <Search size={17} />
-          <input placeholder="Search normalized jobs" value={profile.keywords.join(", ")} readOnly />
+          <input
+            placeholder="Search jobs (e.g. React Developer)"
+            value={jobSearchInput}
+            onChange={(event) => setJobSearchInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void loadServerJobIndex(jobSearchInput.trim());
+              }
+            }}
+          />
         </div>
-        <button type="button" className="icon-button text" onClick={refreshJobs}>
-          <RefreshCw size={17} />
-          Refresh Now
-        </button>
-        <Pill tone="green">auto refresh every 1 minute</Pill>
-        <Pill tone="blue">last sync: {lastSync}</Pill>
-      </section>
-
-      {prepareApiError ? <div className="error-banner">{prepareApiError}</div> : null}
-
-      <section className="panel">
-        <SectionTitle icon={DatabaseZap} title="Tenant job index (PostgreSQL)" />
-        <p className="profile-note">
-          Live search against seeded jobs in your tenant database. Connector cards below remain the deterministic demo sync.
-        </p>
-        {serverIndexError ? <div className="error-banner">{serverIndexError}</div> : null}
-        {serverIndexLoading ? <p className="muted">Loading server index…</p> : null}
-        <div className="toolbar-line">
-          <label className="stacked">
-            <span>Search index</span>
-            <input
-              value={jobSearchInput}
-              onChange={(event) => setJobSearchInput(event.target.value)}
-              placeholder="Title, company, location, domain"
-            />
-          </label>
-          <label className="stacked">
-            <span>Domain filter</span>
-            <input
-              value={jobDomainInput}
-              onChange={(event) => setJobDomainInput(event.target.value)}
-              placeholder="e.g. Technology"
-            />
-          </label>
+        <div className="jobs-toolbar-actions">
           <button
             type="button"
             className="icon-button text"
-            onClick={() => void loadServerJobIndex(jobSearchInput.trim(), jobDomainInput.trim())}
+            onClick={() => void loadServerJobIndex(jobSearchInput.trim())}
           >
             <Search size={17} />
-            Search index
+            Search
+          </button>
+          <button
+            type="button"
+            className="icon-button text"
+            disabled={connectorBusy !== null}
+            onClick={() => void syncConnectedPortals()}
+          >
+            <RefreshCw size={17} className={connectorBusy?.action === "sync" ? "spin" : undefined} />
+            Sync
           </button>
         </div>
-        <div className="job-grid">
-          {dbJobs.slice(0, 12).map((job) => (
-            <article className="job-card" key={job.id}>
-              <div>
-                <Pill tone="blue">{job.source}</Pill>
-                <Pill tone="green">{job.applyMode}</Pill>
-              </div>
-              <h3>{job.title}</h3>
-              <p>
-                {job.company} | {job.location}
-              </p>
-              <div className="job-skills">
-                {job.skills.slice(0, 7).map((skill) => (
-                  <span key={skill}>{skill}</span>
-                ))}
-              </div>
-              <footer>
-                <strong>{job.normalizedScore}% fit</strong>
-                <small className="job-note">Posted {job.postedAt}</small>
-              </footer>
-            </article>
-          ))}
-        </div>
       </section>
 
       <section className="panel">
-        <SectionTitle icon={FileCheck2} title="Applications in database" />
-        <p className="profile-note">Rows from `GET /api/applications` for your signed-in user (or full tenant for admins).</p>
-        <div className="data-table apps">
-          <div className="data-row header">
-            <span>Job id</span>
-            <span>Resume id</span>
-            <span>Status</span>
-            <span>ATS</span>
-            <span>Applied</span>
-          </div>
-          {dbApplications.length === 0 ? (
-            <div className="data-row">
-              <span>No applications returned yet.</span>
-            </div>
-          ) : (
-            dbApplications.slice(0, 20).map((row) => (
-              <div className="data-row" key={row.id}>
-                <span>
-                  <strong className="truncate">{row.jobId}</strong>
-                </span>
-                <span>
-                  <small>{row.resumeId}</small>
-                </span>
-                <span>
-                  <Pill tone="amber">{row.status}</Pill>
-                </span>
-                <span>{row.atsScore}</span>
-                <span>{row.appliedAt}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      <section className="panel">
-        <SectionTitle icon={Network} title="Portal Connector Preparation" />
-        <div className="connector-explainer">
-          <strong>These are setup states, not background timers.</strong>
-          <span>
-            Connected means the demo connector is allowed to refresh matched jobs here. Needs review means a human-approved browser or vendor workflow is required. Not connected means credentials or an approved connector account still need to be added before production sync.
-          </span>
-        </div>
-        <div className="connector-grid">
-          {JOB_PORTAL_CONNECTORS.map((connector) => {
-            const status = profile.connectorStatuses[connector.name] || connector.status;
+        <SectionTitle icon={Network} title="Job connectors" />
+        <div className="connector-grid compact">
+          {EXTERNAL_CONNECTOR_PLATFORMS.map((portalName) => {
+            const statusRow = connectorStatuses.find((item) => item.portalName === portalName);
+            const status = statusRow?.status ?? "not_connected";
+            const envConfigured = statusRow?.envConfigured ?? false;
+            const isPortalBusy = connectorBusy?.portal === portalName;
+            const isGlobalSync = connectorBusy?.action === "sync" && connectorBusy.portal === "all";
+            const busy = isPortalBusy || isGlobalSync || connectorBusy !== null;
+            const busyLabel =
+              isPortalBusy && connectorBusy?.action === "connect"
+                ? "Connecting…"
+                : isPortalBusy && connectorBusy?.action === "disconnect"
+                  ? "Disconnecting…"
+                  : isPortalBusy && connectorBusy?.action === "sync"
+                    ? "Syncing…"
+                    : null;
             return (
-              <article key={connector.name}>
+              <article key={portalName} className={`connector-card-compact${isPortalBusy ? " is-busy" : ""}`}>
                 <header>
-                  <strong>{connector.name}</strong>
-                  <Pill tone={status === "connected" ? "green" : status === "needs_review" ? "amber" : status === "rate_limited" ? "red" : "neutral"}>
-                    {status}
+                  <strong>{portalName}</strong>
+                  <Pill tone={status === "connected" ? "green" : envConfigured ? "neutral" : "amber"}>
+                    {isPortalBusy ? busyLabel : status === "connected" ? "connected" : envConfigured ? "ready" : "not configured"}
                   </Pill>
                 </header>
-                <span>{connector.focus}</span>
-                <small>{connector.authMode} | {connector.applyMode}</small>
-                <p>{connector.setupAction}</p>
                 <div className="row-actions">
-                  <button className="icon-button" onClick={() => toggleConnector(connector.name, "connected")} title="Mark connected">
-                    <CheckCircle2 size={15} />
-                  </button>
-                  <button className="icon-button" onClick={() => toggleConnector(connector.name, "needs_review")} title="Needs review">
-                    <ShieldCheck size={15} />
-                  </button>
+                  {isPortalBusy ? (
+                    <button className="icon-button" disabled title={busyLabel ?? "Working…"}>
+                      <RefreshCw className="spin" size={15} />
+                    </button>
+                  ) : status === "connected" ? (
+                    <button className="icon-button" disabled={busy} onClick={() => void disconnectPortal(portalName)} title="Disconnect">
+                      <X size={15} />
+                    </button>
+                  ) : (
+                    <button
+                      className="icon-button"
+                      disabled={busy || !envConfigured}
+                      onClick={() => void connectPortal(portalName)}
+                      title={envConfigured ? "Connect" : "Configure .env first"}
+                    >
+                      <CheckCircle2 size={15} />
+                    </button>
+                  )}
                 </div>
               </article>
             );
@@ -2221,69 +2281,166 @@ function JobsAndApplications({
         </div>
       </section>
 
-      <section className="job-grid">
-        {visibleRoles.filter((role) => role.status !== "excluded").slice(0, 12).map((role) => (
-          <article className="job-card" key={role.id}>
-            <div>
-              <Pill tone="blue">{role.portal}</Pill>
-              <Pill tone="green">{role.safeApplyMode}</Pill>
+      {canPostInternalJobs ? (
+        <section className="panel">
+          <SectionTitle icon={Plus} title="Post internal company job" />
+          <p className="profile-note">Creates a row in Postgres with source Internal — visible in unified search for your tenant.</p>
+          {internalJobNotice ? <p className="profile-note">{internalJobNotice}</p> : null}
+          <div className="form-grid candidate-profile-grid">
+            <label>
+              <span>Title</span>
+              <input value={internalJobDraft.title} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, title: event.target.value })} />
+            </label>
+            <label>
+              <span>Company</span>
+              <input value={internalJobDraft.company} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, company: event.target.value })} />
+            </label>
+            <label>
+              <span>Location</span>
+              <input value={internalJobDraft.location} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, location: event.target.value })} />
+            </label>
+            <label>
+              <span>Domain</span>
+              <input value={internalJobDraft.domain} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, domain: event.target.value })} />
+            </label>
+            <label>
+              <span>Skills (comma separated)</span>
+              <input value={internalJobDraft.skills} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, skills: event.target.value })} />
+            </label>
+            <label className="full-width">
+              <span>Description</span>
+              <input value={internalJobDraft.description} onChange={(event) => setInternalJobDraft({ ...internalJobDraft, description: event.target.value })} />
+            </label>
+          </div>
+          <button type="button" className="primary-button" onClick={() => void postInternalJob()}>
+            Post internal job
+          </button>
+        </section>
+      ) : null}
+
+      <section className="panel">
+        <SectionTitle icon={BriefcaseBusiness} title="Job listings" />
+        {serverIndexError ? <div className="error-banner">{serverIndexError}</div> : null}
+        {serverIndexLoading ? <p className="muted">Loading jobs…</p> : null}
+        {Object.keys(jobsBySource).length === 0 && !serverIndexLoading ? (
+          <p className="muted">No jobs yet. Connect a portal above and run Sync.</p>
+        ) : null}
+        {orderedJobSources.map((source) => {
+          const group = jobsBySource[source];
+          if (!group) {
+            return null;
+          }
+          const isExpanded = expandedJobSources[source] ?? false;
+          const visibleJobs = isExpanded ? group.jobs : group.jobs.slice(0, jobsPreviewPerSource);
+          const hiddenCount = Math.max(0, group.jobs.length - jobsPreviewPerSource);
+          return (
+          <div key={source} className="panel nested-panel">
+            <SectionTitle icon={BriefcaseBusiness} title={`${source} (${group.count})`} />
+            <div className="job-grid">
+              {visibleJobs.map((job) => (
+                <article className="job-card job-card-compact" key={job.id}>
+                  <h3>{job.title}</h3>
+                  <p>
+                    {job.company} · {job.location}
+                  </p>
+                  {job.skills.length > 0 ? (
+                    <div className="job-skills">
+                      {job.skills.slice(0, 4).map((skill) => (
+                        <span key={skill}>{skill}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <footer className="job-card-actions">
+                    <button
+                      type="button"
+                      className="secondary-button compact"
+                      onClick={() => void prepareDbApplication(job)}
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button compact"
+                      onClick={() => openJobDetails(job)}
+                    >
+                      Apply
+                    </button>
+                  </footer>
+                </article>
+              ))}
             </div>
-            <h3>{role.title}</h3>
-            <p>{role.company} | {role.location}</p>
-            <div className="job-skills">
-              {role.keywords.slice(0, 7).map((skill) => <span key={skill}>{skill}</span>)}
-            </div>
-            <footer>
-              <strong>{role.matchScore}% match</strong>
+            {hiddenCount > 0 ? (
               <button
                 type="button"
-                className="icon-button"
-                onClick={() => void prepareApplication(role)}
-                title="Prepare application"
+                className="jobs-load-more"
+                onClick={() =>
+                  setExpandedJobSources((prev) => ({
+                    ...prev,
+                    [source]: !isExpanded
+                  }))
+                }
               >
-                <Link2 size={16} />
+                {isExpanded ? "Show less" : `More (${hiddenCount} more)`}
               </button>
-            </footer>
-            <small className="job-note">Matched: {role.matchedSignals.slice(0, 3).join(", ") || "verified DB fallback"}</small>
-          </article>
-        ))}
-      </section>
-
-      <section className="panel">
-        <SectionTitle icon={Trash2} title="Excluded by Candidate Blocklist" />
-        <div className="excluded-list">
-          {visibleRoles.filter((role) => role.status === "excluded").map((role) => (
-            <article key={role.id}>
-              <strong>{role.title} at {role.company}</strong>
-              <span>{role.portal} | blocked by {role.exclusionHits.join(", ")}</span>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel">
-        <SectionTitle icon={Archive} title="Applied and Prepared Role Records" />
-        <div className="data-table apps">
-          <div className="data-row header">
-            <span>Job</span>
-            <span>Company</span>
-            <span>Status</span>
-            <span>Portal</span>
-            <span>Resume</span>
-            <span>Response</span>
+            ) : null}
           </div>
-          {appliedRoles.filter((record) => record.userId === currentUser.id).map((record) => (
-            <div className="data-row" key={record.id}>
-              <span><strong>{record.title}</strong><small>{record.link}</small></span>
-              <span>{record.companyName}</span>
-              <span><Pill tone="amber">{record.status}</Pill></span>
-              <span>{record.portal}</span>
-              <span>{record.resumeId}</span>
-              <span>{record.response || "No response yet"}</span>
-            </div>
-          ))}
-        </div>
+          );
+        })}
       </section>
+
+      {selectedJobDetail ? (
+        <div className="job-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="job-detail-title">
+          <div className="job-detail-backdrop" onClick={closeJobDetails} />
+          <section className="job-detail-panel panel">
+            <header className="job-detail-header">
+              <div>
+                <Pill tone="blue">{selectedJobDetail.source}</Pill>
+                <h2 id="job-detail-title">{selectedJobDetail.title}</h2>
+                <p>
+                  {selectedJobDetail.company} · {selectedJobDetail.location}
+                </p>
+              </div>
+              <button type="button" className="icon-button" onClick={closeJobDetails} title="Close">
+                <X size={18} />
+              </button>
+            </header>
+            <div className="job-detail-meta">
+              <span>Posted {selectedJobDetail.postedAt}</span>
+              <span>{selectedJobDetail.normalizedScore}% fit</span>
+              <span>{selectedJobDetail.applyMode}</span>
+            </div>
+            {selectedJobDetail.skills.length > 0 ? (
+              <div className="job-skills">
+                {selectedJobDetail.skills.map((skill) => (
+                  <span key={skill}>{skill}</span>
+                ))}
+              </div>
+            ) : null}
+            <div className="job-detail-description">
+              {jobDescriptionWithoutApplyLine(selectedJobDetail.description) || "No description available for this job."}
+            </div>
+            <footer className="job-detail-actions">
+              <button type="button" className="secondary-button" onClick={() => void prepareDbApplication(selectedJobDetail)}>
+                Save
+              </button>
+              {extractJobApplyUrl(selectedJobDetail.description) ? (
+                <a
+                  className="primary-button"
+                  href={extractJobApplyUrl(selectedJobDetail.description)!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open apply page
+                </a>
+              ) : (
+                <button type="button" className="primary-button" disabled title="No external apply link for this job">
+                  Open apply page
+                </button>
+              )}
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3808,7 +3965,7 @@ export default function ProductionPortalApp() {
         {activeTab === "jobs" ? (
           isCompanyAdmin
             ? <TenantJobActivity currentUser={currentUser} users={users} candidateProfiles={candidateProfiles} syncedRoles={syncedRoles} appliedRoles={appliedRoles} apiTenantId={apiTenantId} />
-            : <JobsAndApplications currentUser={currentUser} users={users} setUsers={setUsers} candidateProfiles={candidateProfiles} setCandidateProfiles={setCandidateProfiles} syncedRoles={syncedRoles} setSyncedRoles={setSyncedRoles} appliedRoles={appliedRoles} setAppliedRoles={setAppliedRoles} result={result} apiTenantId={apiTenantId} />
+            : <JobsAndApplications currentUser={currentUser} users={users} setUsers={setUsers} candidateProfiles={candidateProfiles} setCandidateProfiles={setCandidateProfiles} appliedRoles={appliedRoles} setAppliedRoles={setAppliedRoles} result={result} apiTenantId={apiTenantId} />
         ) : null}
         {activeTab === "billing" ? <Billing currentUser={currentUser} users={users} tenants={tenants} ledger={ledger} setLedger={setLedger} /> : null}
         {activeTab === "architecture" ? <Architecture /> : null}

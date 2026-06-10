@@ -22,6 +22,28 @@ export const resumeGenerationRequestSchema = z.object({
   strategy: resumeStrategySchema.optional().default("recruiter-readable")
 });
 
+export const jobCreateSchema = z.object({
+  title: z.string().min(2),
+  company: z.string().min(2),
+  location: z.string().min(1),
+  domain: z.string().min(1),
+  skills: z.array(z.string().min(1)).min(1),
+  description: z.string().optional(),
+  applyMode: z.enum(["human_assisted", "connector_ready", "manual"]).optional(),
+  normalizedScore: z.coerce.number().min(0).max(100).optional(),
+  postedAt: z.string().optional()
+});
+
+export const connectorPortalSchema = z.enum(["Greenhouse", "Lever", "Adzuna", "JSearch", "Jooble"]);
+
+export const connectorConnectSchema = z.object({}).optional();
+
+export const connectorSyncSchema = z.object({
+  query: z.string().optional().default(""),
+  keywords: z.array(z.string()).optional().default([]),
+  portals: z.array(connectorPortalSchema).optional()
+});
+
 export const jobSyncRequestSchema = z.object({
   profile: z.any().optional(),
   existing: z.array(z.any()).optional(),
