@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { ZodError } from "zod";
 import { auth } from "@/auth";
-import { errEnvelope, okEnvelope } from "@/lib/http/api-envelope";
-import { AppError, RateLimitError } from "@/lib/http/api-errors";
+import { toApiErrorResponse } from "@/lib/http/api-error-response";
+import { okEnvelope } from "@/lib/http/api-envelope";
+import { AppError } from "@/lib/http/api-errors";
 import type { ServerEnv } from "@/lib/config/env";
 import type { AppLogger } from "@/lib/log/logger";
 import { createLogger } from "@/lib/log/logger";
@@ -16,6 +16,8 @@ import { writeAuditEvent } from "@/lib/auth/audit";
 import { portalUserUuid } from "@/lib/ids/stable-uuid";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export { toApiErrorResponse } from "@/lib/http/api-error-response";
 
 export type ApiContext = {
   requestId: string;
@@ -128,31 +130,6 @@ export async function enforceRateLimit(
     const ip = getClientIp(request, ctx.env.TRUST_PROXY ?? false);
     await rateLimitConsume(`${rateLimitKey}:${ip}`, ctx.env);
   }
-}
-
-export function toApiErrorResponse(error: unknown, requestId: string, logger: AppLogger): NextResponse {
-  if (error instanceof ZodError) {
-    const body = errEnvelope("VALIDATION_ERROR", "Request validation failed", requestId, error.flatten());
-    return NextResponse.json(body, { status: 400, headers: { "x-request-id": requestId } });
-  }
-  if (error instanceof RateLimitError) {
-    const body = errEnvelope(error.code, error.message, requestId);
-    return NextResponse.json(body, {
-      status: 429,
-      headers: { "x-request-id": requestId, "retry-after": "60" }
-    });
-  }
-  if (error instanceof AppError) {
-    const body = errEnvelope(error.code, error.message, requestId, error.details);
-    return NextResponse.json(body, { status: error.status, headers: { "x-request-id": requestId } });
-  }
-  logger.error({ err: error }, "Unhandled API error");
-  const body = errEnvelope(
-    "INTERNAL_ERROR",
-    error instanceof Error ? error.message : "Internal server error",
-    requestId
-  );
-  return NextResponse.json(body, { status: 500, headers: { "x-request-id": requestId } });
 }
 
 export async function handleJsonApi<T>(

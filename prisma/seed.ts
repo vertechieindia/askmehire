@@ -3,7 +3,7 @@ import {
   APPLICATIONS,
   DOMAIN_PROFILES,
   INTELLIGENCE_COMPONENTS,
-  JOB_LISTINGS,
+  INTERNAL_JOB_LISTINGS,
   TECHNOLOGY_TIMELINES
 } from "../lib/catalog";
 import { hashPassword } from "../lib/auth/password";
@@ -219,7 +219,7 @@ async function main() {
     });
   }
 
-  for (const job of JOB_LISTINGS) {
+  for (const job of INTERNAL_JOB_LISTINGS) {
     const id = SEED_IDS.job(job.id);
     await prisma.job.upsert({
       where: { id },
@@ -247,6 +247,22 @@ async function main() {
       }
     });
   }
+
+  await prisma.application.deleteMany({
+    where: {
+      tenantId,
+      job: {
+        source: { notIn: ["Internal", "Greenhouse", "Lever", "Adzuna", "JSearch", "Jooble"] }
+      }
+    }
+  });
+
+  await prisma.job.deleteMany({
+    where: {
+      tenantId,
+      source: { notIn: ["Internal", "Greenhouse", "Lever", "Adzuna", "JSearch", "Jooble"] }
+    }
+  });
 
   const resumeLegacyIds = new Set(APPLICATIONS.map((a) => a.resumeId));
   for (const rid of resumeLegacyIds) {

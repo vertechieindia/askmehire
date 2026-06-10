@@ -107,12 +107,15 @@ export const PERMISSIONS: Record<PortalRole, string[]> = {
     "tenant:view_usage",
     "candidate:generate_resume",
     "candidate:track_jobs",
+    "jobs:create_internal",
+    "connector:manage",
     "email:approve",
     "billing:view_tenant"
   ],
   INDIVIDUAL_CANDIDATE: [
     "candidate:generate_resume",
     "candidate:track_jobs",
+    "connector:manage",
     "email:draft",
     "email:request_approval",
     "billing:pay_self"
@@ -128,10 +131,17 @@ export const PERMISSIONS: Record<PortalRole, string[]> = {
     "analytics:view"
   ],
   REVIEWER: ["components:review", "email:approve", "analytics:view"],
-  RECRUITER: ["candidate:generate_resume", "candidate:track_jobs", "email:draft"],
+  RECRUITER: [
+    "candidate:generate_resume",
+    "candidate:track_jobs",
+    "jobs:create_internal",
+    "connector:manage",
+    "email:draft"
+  ],
   TENANT_CANDIDATE: [
     "candidate:generate_resume",
     "candidate:track_jobs",
+    "connector:manage",
     "email:draft",
     "email:request_approval"
   ]

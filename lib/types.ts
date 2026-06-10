@@ -67,7 +67,20 @@ export interface ResumeComponent {
 
 export interface JobListing {
   id: string;
-  source: "LinkedIn" | "Dice" | "Monster" | "ZipRecruiter" | "Glassdoor" | "Prime Vendor" | "Internal";
+  source:
+    | "LinkedIn"
+    | "Dice"
+    | "Monster"
+    | "Indeed"
+    | "Greenhouse"
+    | "Lever"
+    | "Adzuna"
+    | "JSearch"
+    | "Jooble"
+    | "ZipRecruiter"
+    | "Glassdoor"
+    | "Prime Vendor"
+    | "Internal";
   title: string;
   company: string;
   location: string;
@@ -76,11 +89,20 @@ export interface JobListing {
   normalizedScore: number;
   postedAt: string;
   applyMode: "human_assisted" | "connector_ready" | "manual";
+  description?: string;
+}
+
+export interface JobSourceGroup {
+  count: number;
+  jobs: JobListing[];
 }
 
 /** Response shape of `GET /api/jobs` (envelope `data`). */
 export interface JobsApiData {
+  query: string;
+  total: number;
   jobs: JobListing[];
+  bySource: Record<string, JobSourceGroup>;
   sourceCoverage: string[];
   antiSpamPolicy: {
     mode: string;

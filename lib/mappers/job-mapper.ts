@@ -12,6 +12,7 @@ export function mapPrismaJobToListing(row: Job): JobListing {
     skills: row.skills,
     normalizedScore: row.normalizedScore,
     postedAt: row.postedAt ? row.postedAt.toISOString().slice(0, 10) : row.createdAt.toISOString().slice(0, 10),
-    applyMode: row.applyMode as JobListing["applyMode"]
+    applyMode: row.applyMode as JobListing["applyMode"],
+    description: row.description ?? ""
   };
 }

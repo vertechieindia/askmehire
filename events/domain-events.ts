@@ -14,7 +14,10 @@ export type DomainEvent =
       type: "jobs.synced";
       tenantId: string;
       requestId: string;
-      payload: { userId: string; count: number };
+      payload:
+        | { userId: string; count: number }
+        | { source: string; jobId: string; action: string }
+        | { query: string; portals: string[]; imported: number };
     }
   | {
       type: "component.created";
