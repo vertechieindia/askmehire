@@ -6,8 +6,8 @@ const prisma = new PrismaClient();
 async function main() {
   const tenantId = process.env.DEFAULT_TENANT_ID;
   const where = tenantId
-    ? { tenantId, source: { notIn: [...INDEXED_JOB_SOURCES] } as const }
-    : { source: { notIn: [...INDEXED_JOB_SOURCES] } as const };
+    ? { tenantId, source: { notIn: [...INDEXED_JOB_SOURCES] }  }
+    : { source: { notIn: [...INDEXED_JOB_SOURCES] } };
 
   const staleJobs = await prisma.job.findMany({ where, select: { id: true } });
   const staleJobIds = staleJobs.map((job) => job.id);
